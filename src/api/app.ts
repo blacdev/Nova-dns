@@ -4,7 +4,7 @@
  */
 
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { sameString } from "../lib/secrets.js";
+import { decrypt, sameString } from "../lib/secrets.js";
 import { ApiError, unauthorized } from "../lib/errors.js";
 import * as studio from "./studio.js";
 import type { Deps } from "./studio.js";
@@ -54,6 +54,15 @@ export function buildApi(d: Deps): FastifyInstance {
     const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
     if (!d.config.turnUsageToken || !sameString(given, d.config.turnUsageToken)) throw unauthorized("Not allowed.", "forbidden");
     return studio.recordTurnUsage(d, body(req));
+  });
+
+  // The coturn host fetches turn.<root>'s certificate (issued by the worker).
+  app.get("/internal/turn-cert", async (req, reply) => {
+    const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
+    if (!d.config.turnUsageToken || !sameString(given, d.config.turnUsageToken)) throw unauthorized("Not allowed.", "forbidden");
+    const row = (await d.db.query<{ key_enc: string; cert_pem: string | null; expires_at: Date | null }>("SELECT key_enc, cert_pem, expires_at FROM platform_certs WHERE name = 'turn'")).rows[0];
+    if (!row?.cert_pem) return reply.status(404).send({ error: { code: "not_ready", message: "Not issued yet." } });
+    return { cert_pem: row.cert_pem, key_pem: decrypt(d.config.sessionSecret, row.key_enc), expires_at: row.expires_at };
   });
 
   app.get("/healthz", async (_req, reply) => {

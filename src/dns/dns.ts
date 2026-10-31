@@ -104,6 +104,17 @@ export class DnsManager {
     await this.retry(`set TXT ${name}`, fqdn, () => this.provider.upsertRecord(name, "TXT", value, STUDIO_TTL));
   }
 
+  /** The challenge for one of the platform's own names (turn.<root>): worker only, never a studio flow. */
+  async setPlatformChallenge(label: "turn", value: string): Promise<void> {
+    const name = `_acme-challenge.${label}.${this.rootDomain}`;
+    await this.retry(`set TXT ${name}`, name, () => this.provider.upsertRecord(name, "TXT", value, STUDIO_TTL));
+  }
+
+  async clearPlatformChallenge(label: "turn", value: string): Promise<void> {
+    const name = `_acme-challenge.${label}.${this.rootDomain}`;
+    await this.retry(`remove TXT ${name}`, name, () => this.provider.deleteRecord(name, "TXT", value)).catch(() => undefined);
+  }
+
   async clearChallenge(fqdn: string, value: string): Promise<void> {
     const name = `_acme-challenge.${fqdn}`;
     if (!(await this.allowed(name))) return;

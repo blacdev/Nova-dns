@@ -1,5 +1,5 @@
 /**
- * One program, four roles: `node dist/main.js <migrate | api | dashboard | worker | all>`.
+ * One program, several roles: `node dist/main.js <migrate | api | dashboard | worker | all | turn-usage>`.
  * Docker Compose runs api, dashboard and worker as separate services; `all` is for
  * development on one machine.
  */
@@ -24,6 +24,18 @@ export function providerFor(c: Config): DnsProvider {
 
 async function main() {
   const role = process.argv[2] ?? "all";
+  if (role === "turn-usage") {
+    // On the coturn host: no database, only the API's address and the usage token.
+    const { keepTurnCert, ship } = await import("./turn/shipper.js");
+    const need = (n: string) => process.env[n] || (() => { throw new Error(`${n} is not set`); })();
+    ship({ logFile: process.env.TURN_LOG_FILE ?? "/var/log/coturn/turn.log", apiBase: need("API_BASE"), token: need("TURN_USAGE_TOKEN") });
+    if (process.env.TURN_CERT_DIR) {
+      keepTurnCert({ apiBase: need("API_BASE"), token: need("TURN_USAGE_TOKEN"), dir: process.env.TURN_CERT_DIR,
+        reloadPid: process.env.TURN_RELOAD_PID ? Number(process.env.TURN_RELOAD_PID) : undefined });
+    }
+    console.log("shipping TURN usage");
+    return;
+  }
   const config = loadConfig();
   if (config.acmeCaBundle && !config.acmeCaBundle.includes("BEGIN")) config.acmeCaBundle = readFileSync(config.acmeCaBundle, "utf8");
   const db: Db = connect(config.databaseUrl);
@@ -48,9 +60,13 @@ async function main() {
     stops.push(() => dash.close());
   }
   if (role === "worker" || role === "all") {
-    const worker = await startWorker({ db, dns, mail, config, issuer: new Issuer({ db, dns, config }) });
+    const locks = connect(config.databaseUrl, 16); // one per job and the listener
+    const worker = await startWorker({ db, dns, mail, config, locks, issuer: new Issuer({ db, dns, config }) });
     console.log("worker running");
-    stops.push(() => worker.stop());
+    stops.push(async () => {
+      await worker.stop();
+      await locks.end();
+    });
   }
   if (!stops.length) throw new Error(`unknown role ${role}: use migrate, api, dashboard, worker or all`);
 

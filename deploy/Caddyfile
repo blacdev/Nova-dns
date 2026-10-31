@@ -1,0 +1,17 @@
+# api.ROOT_DOMAIN and app.ROOT_DOMAIN, with certificates Caddy gets by itself.
+# The platform believes X-Forwarded-For only from Caddy (TRUSTED_PROXIES=172.28.0.10).
+{
+	email {$ACME_EMAIL}
+}
+
+api.{$ROOT_DOMAIN} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy api:8080
+}
+
+app.{$ROOT_DOMAIN} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy dashboard:8081
+}

@@ -149,4 +149,17 @@ describe.skipIf(!available)("certificates from Pebble, by DNS-01", () => {
     expect(q.error).toBeNull();
     expect(q.done_at).toBeInstanceOf(Date);
   });
+
+  it("keeps the platform's own certificate for turn.<root>, and the coturn host can fetch it", async () => {
+    expect(await issuer.ensurePlatformCert("turn")).toBe(true);
+    expect(await issuer.ensurePlatformCert("turn")).toBe(false); // not again while it has 30+ days
+    const denied = await api.inject({ method: "GET", url: "/internal/turn-cert", headers: { authorization: "Bearer wrong" } });
+    expect(denied.statusCode).toBe(401);
+    const got = (await api.inject({ method: "GET", url: "/internal/turn-cert", headers: { authorization: "Bearer usage-token" } })).json();
+    const cert = new X509Certificate(got.cert_pem);
+    expect(cert.subjectAltName).toBe("DNS:turn.example.test");
+    expect(cert.checkPrivateKey((await import("node:crypto")).createPrivateKey(got.key_pem))).toBe(true);
+    // A studio flow can still never touch turn.<root>.
+    await expect(dns.setChallenge("turn.example.test", "x")).rejects.toThrow(/protected/);
+  });
 });

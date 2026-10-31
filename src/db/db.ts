@@ -15,8 +15,8 @@ export type Queryable = pg.Pool | pg.PoolClient;
 // Dates come back as JavaScript Dates; BIGINT ids as numbers (they stay far below 2^53).
 pg.types.setTypeParser(20, (v) => Number(v));
 
-export function connect(url: string): Db {
-  return new pg.Pool({ connectionString: url, max: 10 });
+export function connect(url: string, max = 10): Db {
+  return new pg.Pool({ connectionString: url, max });
 }
 
 const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");

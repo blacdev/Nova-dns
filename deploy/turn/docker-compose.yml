@@ -1,0 +1,51 @@
+# coturn on its own host (bandwidth-heavy, public address, not behind the API's proxy),
+# with the shipper beside it: it reports relayed usage per studio to the API and keeps
+# turn.ROOT_DOMAIN's certificate (issued by the platform) current, reloading coturn.
+#
+#   cp ../../.env.example .env   # TURN_SHARED_SECRET, TURN_HOST, API_BASE, TURN_USAGE_TOKEN
+#   docker compose up -d
+# Firewall: UDP/TCP 3478, TCP 443, UDP 49152-65535.
+name: nova-turn
+
+services:
+  config:
+    image: alpine:3.20
+    env_file: .env
+    command: ["/bin/sh", "/turn/render-config.sh", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./:/turn:ro
+      - coturn_etc:/etc/coturn
+
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host
+    user: root
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    depends_on:
+      config:
+        condition: service_completed_successfully
+    volumes:
+      - coturn_etc:/etc/coturn
+      - coturn_log:/var/log/coturn
+
+  shipper:
+    build: ../..
+    image: nova-platform
+    restart: unless-stopped
+    command: ["turn-usage"]
+    env_file: .env
+    environment:
+      TURN_LOG_FILE: /var/log/coturn/turn.log
+      TURN_CERT_DIR: /etc/coturn
+      # Shares coturn's process namespace, where coturn is process 1: SIGUSR2 reloads its certificate.
+      TURN_RELOAD_PID: "1"
+    user: root
+    pid: "service:coturn"
+    volumes:
+      - coturn_etc:/etc/coturn
+      - coturn_log:/var/log/coturn:ro
+
+volumes:
+  coturn_etc:
+  coturn_log:

@@ -111,30 +111,42 @@ export class Issuer {
     return r.rows[0] ?? null;
   }
 
-  private async issue(job: { id: number; subdomain_id: number; fqdn: string; csr_pem: string; renews_id: number | null }) {
+  /** One ACME order by DNS-01 for `fqdn` from `csr`; the full chain PEM. */
+  private async order(fqdn: string, csr: string, challenge: { set: (v: string) => Promise<void>; clear: (v: string) => Promise<void> }, replaces?: string): Promise<string> {
     const client = await this.account();
-    const orderData: Record<string, unknown> = { identifiers: [{ type: "dns", value: job.fqdn }] };
-    if (job.renews_id) {
-      const before = (await this.d.db.query<{ cert_pem: string }>("SELECT cert_pem FROM certificates WHERE id = $1", [job.renews_id])).rows[0];
-      if (before?.cert_pem && (await this.renewalInfoBase())) orderData.replaces = certId(before.cert_pem);
-    }
+    const orderData: Record<string, unknown> = { identifiers: [{ type: "dns", value: fqdn }] };
+    if (replaces) orderData.replaces = replaces;
     const order = await client.createOrder(orderData as unknown as Parameters<acme.Client["createOrder"]>[0]);
     const auths = await client.getAuthorizations(order);
     const set: string[] = [];
     try {
       for (const auth of auths) {
         if (auth.status === "valid") continue;
-        const challenge = auth.challenges.find((c) => c.type === "dns-01");
-        if (!challenge) throw new Error("the CA offered no DNS-01 challenge");
-        const value = await client.getChallengeKeyAuthorization(challenge);
-        await this.d.dns.setChallenge(job.fqdn, value);
+        const ch = auth.challenges.find((c) => c.type === "dns-01");
+        if (!ch) throw new Error("the CA offered no DNS-01 challenge");
+        const value = await client.getChallengeKeyAuthorization(ch);
+        await challenge.set(value);
         set.push(value);
-        await (this.d.waitForTxt ?? ((n, v) => waitForTxt(n, v, this.d.config.dnsCheckResolver)))(`_acme-challenge.${job.fqdn}`, value);
-        await client.completeChallenge(challenge);
-        await client.waitForValidStatus(challenge);
+        await (this.d.waitForTxt ?? ((n, v) => waitForTxt(n, v, this.d.config.dnsCheckResolver)))(`_acme-challenge.${fqdn}`, value);
+        await client.completeChallenge(ch);
+        await client.waitForValidStatus(ch);
       }
-      const finalized = await client.finalizeOrder(order, job.csr_pem);
-      const pem = await client.getCertificate(finalized);
+      return await client.getCertificate(await client.finalizeOrder(order, csr));
+    } finally {
+      for (const v of set) await challenge.clear(v);
+    }
+  }
+
+  private async issue(job: { id: number; subdomain_id: number; fqdn: string; csr_pem: string; renews_id: number | null }) {
+    let replaces: string | undefined;
+    if (job.renews_id) {
+      const before = (await this.d.db.query<{ cert_pem: string }>("SELECT cert_pem FROM certificates WHERE id = $1", [job.renews_id])).rows[0];
+      if (before?.cert_pem && (await this.renewalInfoBase())) replaces = certId(before.cert_pem);
+    }
+    {
+      const pem = await this.order(job.fqdn, job.csr_pem, {
+        set: (v) => this.d.dns.setChallenge(job.fqdn, v), clear: (v) => this.d.dns.clearChallenge(job.fqdn, v),
+      }, replaces);
       const [leaf, ...chain] = splitPem(pem);
       const cert = new X509Certificate(leaf);
       const renewAfter = await this.renewalWindow(leaf).catch(() => null);
@@ -144,8 +156,36 @@ export class Issuer {
         [job.id, leaf, chain.join(""), cert.serialNumber.toLowerCase(), new Date(cert.validTo), renewAfter]);
       await this.d.db.query("UPDATE certificates SET status = 'superseded' WHERE subdomain_id = $1 AND status = 'issued' AND id <> $2", [job.subdomain_id, job.id]);
       await opsEvent(this.d.db, "acme", `issued, until ${cert.validTo}`, job.fqdn, "info");
-    } finally {
-      for (const v of set) await this.d.dns.clearChallenge(job.fqdn, v);
+    }
+  }
+
+  // ---------------------------------------------------------------- the platform's own (turn.<root>)
+
+  /** Keep a certificate for turn.<root> (coturn's TLS), renewed with 30 days left. */
+  async ensurePlatformCert(label: "turn" = "turn"): Promise<boolean> {
+    const fqdn = `${label}.${this.d.config.rootDomain}`;
+    const row = (await this.d.db.query<{ key_enc: string; expires_at: Date | null }>("SELECT key_enc, expires_at FROM platform_certs WHERE name = $1", [label])).rows[0];
+    if (row?.expires_at && row.expires_at.getTime() - Date.now() > RENEW_DAYS * 86400_000) return false;
+    let key: string;
+    if (row) key = decrypt(this.d.config.sessionSecret, row.key_enc);
+    else {
+      key = (await acme.crypto.createPrivateEcdsaKey("P-256")).toString();
+      await this.d.db.query("INSERT INTO platform_certs (name, key_enc) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING", [label, encrypt(this.d.config.sessionSecret, key)]);
+    }
+    const [, csr] = await acme.crypto.createCsr({ commonName: fqdn, altNames: [fqdn] }, key);
+    try {
+      const pem = await this.order(fqdn, csr.toString(), {
+        set: (v) => this.d.dns.setPlatformChallenge(label, v), clear: (v) => this.d.dns.clearPlatformChallenge(label, v),
+      });
+      const leaf = splitPem(pem)[0];
+      await this.d.db.query("UPDATE platform_certs SET cert_pem = $2, expires_at = $3, error = NULL, updated_at = now() WHERE name = $1",
+        [label, pem, new Date(new X509Certificate(leaf).validTo)]);
+      await opsEvent(this.d.db, "acme", "issued (platform)", fqdn, "info");
+      return true;
+    } catch (e) {
+      await this.d.db.query("UPDATE platform_certs SET error = $2, updated_at = now() WHERE name = $1", [label, (e as Error).message.slice(0, 500)]);
+      await opsEvent(this.d.db, "acme", `platform certificate failed: ${(e as Error).message}`, fqdn);
+      throw e;
     }
   }
 

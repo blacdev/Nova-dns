@@ -14,6 +14,7 @@
  * | tokens       | 1 h     | drop expired or revoked tokens, sessions and email links      |
  * | prune        | 1 day   | audit, usage and operations rows past their retention         |
  * | alert        | 1 day   | email admins the DNS/ACME failures not yet reported           |
+ * | platform-cert| 6 h     | turn.<root>'s own certificate for coturn (30 days ahead)      |
  */
 
 import type { Db } from "../db/db.js";
@@ -27,6 +28,9 @@ export const OFFLINE_AFTER_MINUTES = 10;
 
 export interface JobDeps {
   db: Db;
+  /** Connections held for each job's advisory lock (and the LISTEN): kept apart from `db`,
+   *  so running jobs can never use up the connections the work itself needs. */
+  locks?: Db;
   issuer: Issuer;
   dns: DnsManager;
   mail: Mailer;
@@ -93,6 +97,7 @@ export function jobsFor(d: JobDeps): Job[] {
     { name: "tokens", everyMs: 3600_000, run: () => expireTokens(d.db) },
     { name: "prune", everyMs: 86400_000, run: () => prune(d.db, d.retention) },
     { name: "alert", everyMs: 86400_000, run: () => dailyAlert(d) },
+    { name: "platform-cert", everyMs: 6 * 3600_000, run: () => d.issuer.ensurePlatformCert("turn") },
   ];
 }
 
@@ -106,7 +111,7 @@ export async function startWorker(d: JobDeps): Promise<{ stop: () => Promise<voi
   const run = async (job: Job, index: number) => {
     if (stopped || running.has(job.name)) return;
     running.add(job.name);
-    const client = await d.db.connect().catch(() => null);
+    const client = await (d.locks ?? d.db).connect().catch(() => null);
     try {
       if (!client) return;
       const locked = (await client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [LOCK_BASE + index])).rows[0].ok;
@@ -129,7 +134,7 @@ export async function startWorker(d: JobDeps): Promise<{ stop: () => Promise<voi
     timers.set(job.name, setInterval(() => void run(job, i), job.everyMs));
   });
 
-  const listener = await d.db.connect();
+  const listener = await (d.locks ?? d.db).connect();
   await listener.query("LISTEN cert_queue");
   listener.on("notification", () => void run(jobs[0], 0));
 
