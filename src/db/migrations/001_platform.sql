@@ -172,3 +172,11 @@ CREATE TABLE revoke_queue (
     error       TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- The platform's one ACME account (its key encrypted with SESSION_SECRET's key).
+CREATE TABLE acme_account (
+    directory_url  TEXT        PRIMARY KEY,
+    key_enc        TEXT        NOT NULL,
+    account_url    TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
