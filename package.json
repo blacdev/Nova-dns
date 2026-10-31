@@ -1,0 +1,50 @@
+{
+  "name": "nova-dns",
+  "version": "0.1.0",
+  "description": "Nova Remote Studio platform: station subdomains, dynamic DNS, certificates and STUN/TURN credentials.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p . && node -e \"require('fs').cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\"",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "migrate": "node dist/main.js migrate",
+    "start:api": "node dist/main.js api",
+    "start:dashboard": "node dist/main.js dashboard",
+    "start:worker": "node dist/main.js worker",
+    "dev": "tsx src/main.ts all"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blacdev/nova-dns.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/blacdev/nova-dns/issues"
+  },
+  "homepage": "https://github.com/blacdev/nova-dns#readme",
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/formbody": "^8.0.2",
+    "@peculiar/x509": "^1.14.3",
+    "acme-client": "^5.4.0",
+    "argon2": "^0.45.1",
+    "fastify": "^5.12.7",
+    "nodemailer": "^6.10.1",
+    "pg": "^8.23.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/nodemailer": "^6.4.24",
+    "@types/pg": "^8.23.1",
+    "@types/qrcode": "^1.5.6",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
+}
