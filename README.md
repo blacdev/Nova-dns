@@ -27,8 +27,13 @@ email, and whether this machine takes ports 80/443 itself (Caddy) or sits behind
 reverse proxy such as Nginx Proxy Manager (then it opens the API and dashboard on ports
 8080/8081 and leaves Caddy out). It makes every secret, writes `.env`, starts the
 containers and prints what to do next (DNS records, the proxy hosts, the TURN values, the
-line for Nova's `remote/config.json`). `./setup.sh turn` does the TURN host (it needs a
-public address; `TURN_EXTERNAL_IP=PUBLIC/PRIVATE` for a cloud server behind 1:1 NAT).
+line for Nova's `remote/config.json`). `./setup.sh turn` does the TURN host: on a cloud
+server (`TURN_EXTERNAL_IP=PUBLIC/PRIVATE` behind 1:1 NAT), or on your own network behind
+your router, beside Nova: then it also takes the Nova server's LAN address
+(`TURN_ALLOWED_PEER_IP`, the one private address the relay may reach; every other stays
+refused), a small port range to forward (`TURN_MIN_PORT`/`TURN_MAX_PORT`, 40000-40999 by
+default there, clear of the ports Windows gives Nova) and a TLS port off 443
+(`TURN_TLS_PORT`, 5349), and prints the port forwards to make.
 `--dry-run` writes the files and shows the commands without starting anything. Run it
 again to change an answer; secrets are kept.
 
