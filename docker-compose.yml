@@ -6,9 +6,12 @@
 #   docker compose up -d --build
 name: nova-platform
 
+# One image, built once (by migrate below) and used by every service. When each service
+# had its own `build`, newer Docker Compose built them all at the same time and the
+# second failed: 'image "docker.io/library/nova-platform:latest": already exists'.
 x-app: &app
-  build: .
   image: nova-platform
+  pull_policy: never
   env_file: .env
   restart: unless-stopped
   depends_on:
