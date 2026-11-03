@@ -4,3 +4,5 @@ dist/
 *.log
 /tmp/
 coverage/
+
+/docker-compose.proxy.yml

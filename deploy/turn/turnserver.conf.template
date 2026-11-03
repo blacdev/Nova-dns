@@ -8,6 +8,8 @@ use-auth-secret
 # well (coturn accepts every static-auth-secret line); remove it 6 hours later.
 static-auth-secret=${TURN_SHARED_SECRET}
 ${TURN_PREVIOUS_SECRET_LINE}
+# Behind 1:1 NAT: external-ip=PUBLIC/PRIVATE (TURN_EXTERNAL_IP); empty otherwise.
+${TURN_EXTERNAL_IP_LINE}
 realm=${TURN_HOST}
 server-name=${TURN_HOST}
 cert=/etc/coturn/fullchain.pem

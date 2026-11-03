@@ -20,6 +20,20 @@ Compose. DNS: Cloudflare.
 
 ## Deploy
 
+**The quick way: `./setup.sh`.** It asks for the domain, the DNS provider (Cloudflare, or
+`memory` without Cloudflare: then station names and their certificates do not work, the
+dashboard and the TURN relay do), Let's Encrypt staging or production, the admins and
+email, and whether this machine takes ports 80/443 itself (Caddy) or sits behind your own
+reverse proxy such as Nginx Proxy Manager (then it opens the API and dashboard on ports
+8080/8081 and leaves Caddy out). It makes every secret, writes `.env`, starts the
+containers and prints what to do next (DNS records, the proxy hosts, the TURN values, the
+line for Nova's `remote/config.json`). `./setup.sh turn` does the TURN host (it needs a
+public address; `TURN_EXTERNAL_IP=PUBLIC/PRIVATE` for a cloud server behind 1:1 NAT).
+`--dry-run` writes the files and shows the commands without starting anything. Run it
+again to change an answer; secrets are kept.
+
+By hand:
+
 **Platform host** (one machine is enough to start):
 
 ```bash
