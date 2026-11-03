@@ -1,7 +1,7 @@
 # coturn for the Nova platform (spec Part 2, section 6). Rendered by render-config.sh
 # from the environment; runs on its own host with a public address.
 listening-port=3478
-tls-listening-port=443
+tls-listening-port=${TURN_TLS_PORT}
 fingerprint
 use-auth-secret
 # The API signs with TURN_SHARED_SECRET. During a rotation list the previous one as
@@ -14,8 +14,9 @@ realm=${TURN_HOST}
 server-name=${TURN_HOST}
 cert=/etc/coturn/fullchain.pem
 pkey=/etc/coturn/privkey.pem
-min-port=49152
-max-port=65535
+# The relay's own ports (TURN_MIN_PORT..TURN_MAX_PORT): what a router forwards to this host.
+min-port=${TURN_MIN_PORT}
+max-port=${TURN_MAX_PORT}
 no-multicast-peers
 no-cli
 # Never relay into private/internal networks:

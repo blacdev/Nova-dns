@@ -251,8 +251,8 @@ YAML
 
 setup_turn() {
   bold "The TURN relay (coturn): carries presenters' audio when a direct path fails"
-  note "It needs a machine with a PUBLIC address (a small cloud server is ideal), not one"
-  note "behind a home router: it refuses to relay into private networks by design."
+  note "It runs either on a cloud server with its own public address, or on your own"
+  note "network behind your router (beside Nova), with a few ports forwarded to it."
   load_old .env
   load_old deploy/turn/.env
   need_docker
@@ -264,17 +264,41 @@ setup_turn() {
   note "The next two come from the platform's .env (setup.sh printed them)."
   ask_required TURN_SHARED_SECRET "TURN_SHARED_SECRET" "$(old TURN_SHARED_SECRET)"
   ask_required TURN_USAGE_TOKEN "TURN_USAGE_TOKEN" "$(old TURN_USAGE_TOKEN)"
-  note "Cloud servers behind 1:1 NAT (AWS, Google, Oracle...) see a private address on the"
-  note "machine and a public one outside: give both as PUBLIC/PRIVATE. Empty if the public"
-  note "address is on the machine itself."
-  ask TURN_EXTERNAL_IP "External IP (PUBLIC/PRIVATE)" "$(old TURN_EXTERNAL_IP)"
+  local was_where=cloud
+  [ -n "$(old TURN_ALLOWED_PEER_IP)" ] && was_where=home
+  note "cloud: a server with its own public address (or 1:1 NAT, as AWS, Google, Oracle)."
+  note "home:  this machine is on your network behind your router, like the Nova server."
+  choose WHERE "Where is this relay" "$was_where" cloud home
+  TURN_ALLOWED_PEER_IP=""
+  if [ "$WHERE" = home ]; then
+    note "Your public IP and this machine's LAN IP, as PUBLIC/PRIVATE (e.g. 203.0.113.7/192.168.1.40)."
+    ask_required TURN_EXTERNAL_IP "External IP (PUBLIC/PRIVATE)" "$(old TURN_EXTERNAL_IP)"
+    note "The relay refuses every private address except the Nova server's: give its LAN IP"
+    note "(the computer Nova runs on; several, comma separated)."
+    ask_required TURN_ALLOWED_PEER_IP "Nova server's LAN IP" "$(old TURN_ALLOWED_PEER_IP)"
+    note "A small port range to forward, away from the ports Windows gives Nova (49152 and up)."
+    ask_required TURN_MIN_PORT "First relay port" "$(old TURN_MIN_PORT 40000)"
+    ask_required TURN_MAX_PORT "Last relay port" "$(old TURN_MAX_PORT 40999)"
+    note "TURN over TLS needs its own port when 443 already goes to your proxy."
+    ask_required TURN_TLS_PORT "TLS port" "$(old TURN_TLS_PORT 5349)"
+  else
+    note "Machines behind 1:1 NAT see a private address on the machine and a public one"
+    note "outside: give both as PUBLIC/PRIVATE. Empty if the public address is on the machine."
+    ask TURN_EXTERNAL_IP "External IP (PUBLIC/PRIVATE)" "$(old TURN_EXTERNAL_IP)"
+    TURN_MIN_PORT=$(old TURN_MIN_PORT 49152); TURN_MAX_PORT=$(old TURN_MAX_PORT 65535); TURN_TLS_PORT=$(old TURN_TLS_PORT 443)
+  fi
+  if ! [ "$TURN_MIN_PORT" -lt "$TURN_MAX_PORT" ] 2>/dev/null; then
+    fail "The first relay port must be a number below the last one."
+  fi
 
   declare -gA ENV=(
     [TURN_HOST]=$TURN_HOST [API_BASE]=$API_BASE [TURN_SHARED_SECRET]=$TURN_SHARED_SECRET
     [TURN_SHARED_SECRET_PREVIOUS]=$(old TURN_SHARED_SECRET_PREVIOUS) [TURN_USAGE_TOKEN]=$TURN_USAGE_TOKEN
-    [TURN_EXTERNAL_IP]=$TURN_EXTERNAL_IP [ROOT_DOMAIN]=$ROOT_DOMAIN
+    [TURN_EXTERNAL_IP]=$TURN_EXTERNAL_IP [ROOT_DOMAIN]=$ROOT_DOMAIN [TURN_ALLOWED_PEER_IP]=$TURN_ALLOWED_PEER_IP
+    [TURN_MIN_PORT]=$TURN_MIN_PORT [TURN_MAX_PORT]=$TURN_MAX_PORT [TURN_TLS_PORT]=$TURN_TLS_PORT
   )
-  ENV_ORDER=(ROOT_DOMAIN TURN_HOST API_BASE TURN_SHARED_SECRET TURN_SHARED_SECRET_PREVIOUS TURN_USAGE_TOKEN TURN_EXTERNAL_IP)
+  ENV_ORDER=(ROOT_DOMAIN TURN_HOST API_BASE TURN_SHARED_SECRET TURN_SHARED_SECRET_PREVIOUS TURN_USAGE_TOKEN TURN_EXTERNAL_IP
+    TURN_ALLOWED_PEER_IP TURN_MIN_PORT TURN_MAX_PORT TURN_TLS_PORT)
   write_env deploy/turn/.env
 
   local a
@@ -282,11 +306,22 @@ setup_turn() {
   note "$TURN_HOST -> ${a:-(not found yet)}   should be this machine's public IP"
 
   run docker compose -f deploy/turn/docker-compose.yml config --quiet
-  run docker compose -f deploy/turn/docker-compose.yml up -d --build
+  # Recreated every time: the relay reads its config only as it starts.
+  run docker compose -f deploy/turn/docker-compose.yml up -d --build --force-recreate
 
   bold "Next"
-  note "Open on this machine's firewall (and the cloud provider's): UDP+TCP 3478, TCP 443,"
-  note "UDP 49152-65535."
+  if [ "$WHERE" = home ]; then
+    local lan=${TURN_EXTERNAL_IP#*/}
+    note "On your router (OPNsense: Firewall > NAT > Port Forward), to $lan:"
+    note "  UDP and TCP 3478"
+    note "  UDP $TURN_MIN_PORT-$TURN_MAX_PORT"
+    note "  TCP $TURN_TLS_PORT (optional: TURN over TLS)"
+    note "And this machine's own firewall, if it has one: the same ports."
+    note "If your public IP changes, run ./setup.sh turn again with the new one."
+  else
+    note "Open on this machine's firewall (and the cloud provider's): UDP+TCP 3478,"
+    note "TCP $TURN_TLS_PORT, UDP $TURN_MIN_PORT-$TURN_MAX_PORT."
+  fi
   note "Logs: docker compose -f deploy/turn/docker-compose.yml logs -f"
 }
 
