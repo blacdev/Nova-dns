@@ -13,6 +13,8 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+# The guides the dashboard shows (Admin > Setup).
+COPY docs ./docs
 USER node
 ENTRYPOINT ["node", "dist/main.js"]
 CMD ["all"]

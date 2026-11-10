@@ -26,6 +26,8 @@ export interface DashDeps {
   dns: DnsManager;
   config: Config;
   mail: Mailer;
+  /** The addresses a name has on the public internet (the setup page; tests replace it). */
+  lookup?: (name: string) => Promise<string[]>;
 }
 
 type Form = Record<string, string>;

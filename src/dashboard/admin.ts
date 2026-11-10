@@ -4,14 +4,40 @@
  * log and DNS/ACME problems. Role `admin` only.
  */
 
+import { Resolver } from "node:dns/promises";
+import { readFileSync } from "node:fs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { DnsCheckStep } from "../dns/dns.js";
 import { audit } from "../lib/audit.js";
 import { formError, fqdnOf } from "../lib/names.js";
 import * as subs from "../lib/subdomains.js";
 import type { DashDeps, Helpers } from "./app.js";
 import { statusChip } from "./app.js";
-import { bytes, csrfField, html, when } from "./html.js";
+import { bytes, csrfField, html, when, type Html } from "./html.js";
+import { markdown } from "./markdown.js";
 import type { Session } from "./session.js";
+
+const LE_PRODUCTION = "https://acme-v02.api.letsencrypt.org/directory";
+
+/** docs/cloudflare-setup.md, with the guide's example domain replaced by this platform's. */
+function cloudflareGuide(rootDomain: string): Html {
+  try {
+    const text = readFileSync(new URL("../../docs/cloudflare-setup.md", import.meta.url), "utf8");
+    return markdown(text.replaceAll("yourdomain.com", rootDomain));
+  } catch {
+    return html`<p class="dim">The guide (docs/cloudflare-setup.md) is not on this machine. It is in the project's repository.</p>`;
+  }
+}
+
+/** A and AAAA records as the public internet sees them (not this machine's own resolver). */
+async function publicLookup(name: string): Promise<string[]> {
+  const r = new Resolver({ timeout: 3000, tries: 1 });
+  r.setServers(["1.1.1.1", "8.8.8.8"]);
+  const found = await Promise.all([r.resolve4(name).catch(() => [] as string[]), r.resolve6(name).catch(() => [] as string[])]);
+  return found.flat();
+}
+
+const mark = (ok: boolean | null) => (ok === true ? html`<span class="ok">✓</span>` : ok === false ? html`<span class="bad">✗</span>` : html`<span class="dim">?</span>`);
 
 export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   const admin = (req: FastifyRequest, reply: FastifyReply): Session | null => {
@@ -25,7 +51,12 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   };
   const q = (req: FastifyRequest) => String((req.query as Record<string, string>).q ?? "").trim().toLowerCase();
   const tabs = html`<p class="row"><a href="/admin">Overview</a><a href="/admin/users">People</a><a href="/admin/stations">Stations</a><a href="/admin/names">Names</a>
-    <a href="/admin/certificates">Certificates</a><a href="/admin/turn">Audio relay</a><a href="/admin/audit">Audit log</a><a href="/admin/operations">DNS / ACME problems</a></p>`;
+    <a href="/admin/certificates">Certificates</a><a href="/admin/turn">Audio relay</a><a href="/admin/audit">Audit log</a><a href="/admin/operations">DNS / ACME problems</a><a href="/admin/setup">Setup</a></p>`;
+  const unfinished = () => [
+    d.config.dnsProvider === "memory" ? "station names are not published (no DNS provider)" : "",
+    d.config.dnsProvider !== "challtestsrv" && d.config.acmeDirectoryUrl !== LE_PRODUCTION ? "certificates are test certificates (Let's Encrypt staging)" : "",
+    d.config.smtpUrl ? "" : "no email is sent",
+  ].filter(Boolean);
 
   app.get("/admin", async (req, reply) => {
     const s = admin(req, reply);
@@ -36,7 +67,49 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
       <span class="dim">Stations</span><span>${await n("SELECT count(*) AS n FROM subdomains")} (${await n("SELECT count(*) AS n FROM studios WHERE online")} online, ${await n("SELECT count(*) AS n FROM subdomains WHERE status = 'suspended'")} suspended)</span>
       <span class="dim">New certificates, 7 days</span><span>${await n("SELECT count(*) AS n FROM certificates WHERE issued_at > now() - interval '7 days' AND renews_id IS NULL")} of ${d.config.certWeeklyLimit}</span>
       <span class="dim">Problems, 24 h</span><span>${await n("SELECT count(*) AS n FROM ops_events WHERE level = 'error' AND created_at > now() - interval '1 day'")}</span>
-      </div></div>`, h.takeFlash(req, reply));
+      </div>${unfinished().length ? html`<p class="row"><span class="chip bad">Setup not finished</span> <span>${unfinished().join("; ")}.</span> <a href="/admin/setup">Open Setup</a></p>` : ""}</div>`, h.takeFlash(req, reply));
+  });
+
+  // ------------------------------------------------------------------ setup
+
+  const setupPage = (req: FastifyRequest, reply: FastifyReply, s: Session, tested?: { dns: DnsCheckStep[] | null; names: { name: string; found: string[] }[] }) => {
+    const c = d.config;
+    const cloudflare = c.dnsProvider === "cloudflare";
+    const production = c.acmeDirectoryUrl === LE_PRODUCTION;
+    const failed = tested?.dns?.some((x) => x.ok === false);
+    return h.render(req, reply, "Setup", html`<div class="card"><h1>Setup</h1>${tabs}<div class="grid">
+      <span class="dim">Domain</span><span>${c.rootDomain}</span>
+      <span class="dim">DNS provider</span><span>${cloudflare ? html`<span class="chip ok">Cloudflare</span>` : html`<span class="chip bad">${c.dnsProvider}</span> Station names are not published on the internet and their certificates fail. Set up Cloudflare with the guide below.`}</span>
+      <span class="dim">Certificates</span><span>${production ? html`<span class="chip ok">Let's Encrypt, production</span>` : html`<span class="chip bad">test certificates</span> Browsers warn about these. Once a station works, run <span class="mono">./setup.sh</span> again and choose production.`}</span>
+      <span class="dim">Email</span><span>${c.smtpUrl ? html`<span class="chip ok">sending</span> as ${c.mailFrom}` : html`<span class="chip bad">not sending</span> Confirmation and reset links are only written to the dashboard's log. Run <span class="mono">./setup.sh</span> again to add an SMTP address.`}</span>
+      <span class="dim">Admins</span><span>${c.adminEmails.join(", ") || "none named"}</span>
+      </div>
+      <form method="post" action="/admin/setup/check">${csrfField(s.csrf)}<div class="row"><button class="primary">${cloudflare ? "Test the Cloudflare connection" : "Check the platform's addresses"}</button>
+        <span class="dim">${cloudflare ? "Adds and removes one test record, and looks up the platform's own addresses." : "Looks up the platform's own addresses."}</span></div></form></div>
+      ${tested ? html`<div class="card" id="result"><h2>${tested.dns ? (failed ? "Cloudflare: something needs fixing" : "Cloudflare: working") : "The platform's addresses"}</h2>
+        ${tested.dns ? html`<ul class="checks">${tested.dns.map((x) => html`<li>${mark(x.ok)} <b>${x.name}</b><br><span class="${x.ok === false ? "bad" : "dim"}">${x.detail}</span></li>`)}</ul><h2 style="margin-top:20px">The platform's addresses</h2>` : ""}
+        <ul class="checks">${tested.names.map((x) => html`<li>${mark(x.found.length > 0)} <b>${x.name}</b><br><span class="${x.found.length ? "dim" : "bad"}">${x.found.length
+          ? `Points to ${x.found.join(", ")}. Check that this is the right machine's public address.`
+          : "Not found on the internet. Add this record at your DNS provider (the guide's step 6); a new record can take a few minutes to show."}</span></li>`)}</ul></div>` : ""}
+      <div class="card doc">${cloudflareGuide(c.rootDomain)}</div>`, h.takeFlash(req, reply));
+  };
+
+  app.get("/admin/setup", async (req, reply) => {
+    const s = admin(req, reply);
+    if (!s) return reply;
+    return setupPage(req, reply, s);
+  });
+  app.post("/admin/setup/check", async (req, reply) => {
+    const s = admin(req, reply);
+    if (!s) return reply;
+    const lookup = d.lookup ?? publicLookup;
+    const wanted = [`api.${d.config.rootDomain}`, `app.${d.config.rootDomain}`, d.config.turnHost];
+    const [dns, names] = await Promise.all([
+      d.dns.check().catch((e): DnsCheckStep[] => [{ name: "Reach the DNS provider", ok: false, detail: (e as Error).message }]),
+      Promise.all(wanted.map(async (name) => ({ name, found: await lookup(name).catch(() => [] as string[]) }))),
+    ]);
+    await audit(d.db, { actor: s.user.id, action: "setup.check", target: d.dns.providerName, ip: req.ip });
+    return setupPage(req, reply, s, { dns, names });
   });
 
   // ------------------------------------------------------------------ people

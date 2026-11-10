@@ -21,6 +21,15 @@ export interface DnsProvider {
   upsertRecord(name: string, type: RecordType, value: string, ttl: number): Promise<string | null>;
   /** Remove the record (name, type); with `value`, only that one (TXT records can be several). */
   deleteRecord(name: string, type: RecordType, value?: string): Promise<void>;
+  /** Try the provider out for real (read, write, the right zone) and say what is wrong in plain words. */
+  check?(rootDomain: string): Promise<DnsCheckStep[]>;
+}
+
+/** One line of a setup check: `ok` null means "could not tell", which is not a failure. */
+export interface DnsCheckStep {
+  name: string;
+  ok: boolean | null;
+  detail: string;
 }
 
 export const STUDIO_TTL = 60;
@@ -31,6 +40,11 @@ export class DnsManager {
 
   get providerName() {
     return this.provider.name;
+  }
+
+  /** The provider's own setup check; null when it has none (memory, tests). */
+  async check(): Promise<DnsCheckStep[] | null> {
+    return this.provider.check ? this.provider.check(this.rootDomain) : null;
   }
 
   /** Whether a studio flow may touch this name: `<label>.<root>` or its ACME challenge only. */

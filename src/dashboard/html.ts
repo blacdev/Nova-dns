@@ -59,6 +59,12 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 .code{font:600 20px/1.4 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.04em;padding:14px;border:2px dashed var(--accent);border-radius:10px;display:inline-block;word-break:break-all}
 .grid{display:grid;grid-template-columns:180px 1fr;gap:6px 16px}@media(max-width:640px){.grid{grid-template-columns:1fr}}
 #name-state{min-height:1.5em;margin-top:6px;font-size:14px}
+.doc{font-size:16px;line-height:1.65}.doc>*{max-width:720px}.doc>.scroll{max-width:none}.doc h1{font-size:26px;margin-bottom:16px}.doc h2{font-size:20px;margin:32px 0 10px;padding-top:20px;border-top:1px solid var(--line)}
+.doc a{color:var(--accent)}.doc li{margin:6px 0}.doc ol,.doc ul{padding-left:24px}.doc table{font-size:14px;margin:12px 0}
+.doc code,.mono{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--chip);padding:1px 5px;border-radius:5px;word-break:break-word}
+.doc pre{background:var(--chip);padding:12px 14px;border-radius:8px;overflow-x:auto}.doc pre code{background:none;padding:0;word-break:normal}
+.doc blockquote{margin:16px 0;padding:10px 16px;border-left:4px solid var(--accent);background:var(--chip);border-radius:0 8px 8px 0}.doc blockquote p{margin:0}
+.scroll{overflow-x:auto}.checks{list-style:none;padding:0;margin:12px 0 0}.checks li{padding:8px 0;border-bottom:1px solid var(--line)}.checks li:last-child{border-bottom:0}
 `;
 
 export function page(f: Frame, body: Html): string {

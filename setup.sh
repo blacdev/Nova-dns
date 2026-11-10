@@ -4,11 +4,14 @@
 #   ./setup.sh             asks what to set up
 #   ./setup.sh platform    the API, dashboard, worker and database (docker-compose.yml)
 #   ./setup.sh turn        the TURN relay (deploy/turn), on a machine with a public address
+#   ./setup.sh check       tests an existing setup: Cloudflare, DNS records, containers, the API
 #   ./setup.sh --dry-run   writes the settings files and shows the commands, starts nothing
 #
 # It writes .env (and deploy/turn/.env) from your answers, makes every secret itself, and
 # starts the containers. Run it again to change an answer: what you gave before is the
-# default. Needs Docker with the compose plugin, and openssl (or /dev/urandom).
+# default. Needs Docker with the compose plugin, and openssl (or /dev/urandom); with curl
+# it also tests your Cloudflare token and can add the platform's DNS records for you.
+# New to Cloudflare? docs/cloudflare-setup.md goes through it step by step.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -18,8 +21,8 @@ MODE=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
-    platform|turn) MODE="$a" ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    platform|turn|both|check) MODE="$a" ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -28,6 +31,9 @@ bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
 fail() { printf '\033[31m  x %s\033[0m\n' "$*" >&2; exit 1; }
+good() { printf '\033[32m  ✓\033[0m %s\n' "$*"; }
+PROBLEMS=0
+bad() { printf '\033[31m  ✗ %s\033[0m\n' "$*"; PROBLEMS=$((PROBLEMS + 1)); }
 
 # ---------------------------------------------------------------- answers and secrets
 
@@ -43,9 +49,11 @@ load_old() { # KEY=VALUE lines of an existing settings file become the defaults
 }
 old() { printf '%s' "${OLD[$1]:-${2:-}}"; }
 
+INPUT_ENDED=0 # set once there is nothing more to read (answers piped in ran out)
 ask() { # ask VAR "question" default
-  local var=$1 q=$2 def=${3:-} reply
-  if [ -n "$def" ]; then read -r -p "  $q [$def]: " reply || true; else read -r -p "  $q: " reply || true; fi
+  local var=$1 q=$2 def=${3:-} reply=""
+  if [ -n "$def" ]; then read -r -p "  $q [$def]: " reply || INPUT_ENDED=1; else read -r -p "  $q: " reply || INPUT_ENDED=1; fi
+  reply=${reply#"${reply%%[![:space:]]*}"}; reply=${reply%"${reply##*[![:space:]]}"}
   printf -v "$var" '%s' "${reply:-$def}"
 }
 ask_required() {
@@ -53,16 +61,40 @@ ask_required() {
   while :; do
     ask "$@"
     [ -n "${!var}" ] && return 0
+    [ "$INPUT_ENDED" = 1 ] && fail "No answer for \"$2\", and nothing more to read."
     warn "This one is needed."
+  done
+}
+ask_secret() { # like ask_required, but a saved value is offered without being shown
+  local var=$1 q=$2 def=${3:-} reply=""
+  while :; do
+    if [ -n "$def" ]; then read -r -p "  $q [Enter keeps the saved one]: " reply || INPUT_ENDED=1; else read -r -p "  $q: " reply || INPUT_ENDED=1; fi
+    reply=${reply//[[:space:]]/}
+    printf -v "$var" '%s' "${reply:-$def}"
+    [ -n "${!var}" ] && return 0
+    [ "$INPUT_ENDED" = 1 ] && fail "No answer for \"$q\", and nothing more to read."
+    warn "This one is needed."
+  done
+}
+ask_domain() { # ask_domain VAR "question" default: a bare domain name, tidied (no https://, no path)
+  local var=$1 v
+  while :; do
+    ask_required "$@"
+    v=${!var,,}; v=${v#*://}; v=${v%%/*}; v=${v%.}
+    if [[ "$v" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$ ]]; then printf -v "$var" '%s' "$v"; return 0; fi
+    [ "$INPUT_ENDED" = 1 ] && fail "\"$v\" is not a domain name."
+    warn "That does not look like a domain name. Give it like: myradiohost.com"
   done
 }
 choose() { # choose VAR "question" default option...
   local var=$1 q=$2 def=$3; shift 3
   local opts="$*" reply
   while :; do
-    read -r -p "  $q ($opts) [$def]: " reply || true
-    reply=${reply:-$def}
+    reply=""
+    read -r -p "  $q ($opts) [$def]: " reply || INPUT_ENDED=1
+    reply=${reply:-$def}; reply=${reply,,}
     for o in "$@"; do [ "$reply" = "$o" ] && { printf -v "$var" '%s' "$reply"; return 0; }; done
+    [ "$INPUT_ENDED" = 1 ] && fail "\"$reply\" is not one of: $opts"
     warn "Answer one of: $opts"
   done
 }
@@ -98,6 +130,122 @@ need_docker() {
 
 resolves_to() { getent ahosts "$1" 2>/dev/null | awk 'NR==1 {print $1}'; }
 
+# ---------------------------------------------------------------- Cloudflare
+# The same checks as the dashboard's Admin > Setup page, with the same wording as
+# docs/cloudflare-setup.md. Everything here needs curl and CLOUDFLARE_API_TOKEN.
+
+CF_API=${NOVA_CF_API:-https://api.cloudflare.com/client/v4}
+CF_GUIDE="docs/cloudflare-setup.md"
+CF_BODY=""; CF_STATUS=""; CF_OK=0
+CF_ZONE_ID=""; CF_ZONE_NAME=""
+
+cf() { # cf METHOD PATH [JSON]: fills CF_BODY and CF_STATUS; true when Cloudflare said yes
+  local method=$1 path=$2 data=${3:-} out
+  local args=(-sS -m 20 -X "$method" -H "Content-Type: application/json" -w '\n%{http_code}')
+  [ -n "$data" ] && args+=(--data "$data")
+  # The token goes to curl through a config on a pipe, so it never shows in the process list.
+  out=$(curl "${args[@]}" -K <(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN") "$CF_API$path" 2>/dev/null) || { CF_BODY=""; CF_STATUS=000; return 1; }
+  CF_STATUS=${out##*$'\n'}; CF_BODY=${out%$'\n'*}
+  [[ "$CF_STATUS" == 2* ]] && printf '%s' "$CF_BODY" | grep -q '"success"[[:space:]]*:[[:space:]]*true'
+}
+cf_field() { # the first "KEY": "VALUE" in the last answer
+  printf '%s' "$CF_BODY" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"\(.*\)"$/\1/' || true
+}
+cf_refused() { # say why the last request failed, in the guide's words
+  case "$CF_STATUS" in
+    000) warn "Cloudflare could not be reached from this machine. Check its internet connection." ;;
+    401) warn "Cloudflare did not accept the token. It may be copied incompletely, deleted, or be"
+         warn "the Global API Key. See $CF_GUIDE, step 5." ;;
+    403) warn "The token may not use this domain. It was made for another domain, or the Zone ID"
+         warn "is another domain's. See $CF_GUIDE, steps 4 and 5." ;;
+    400|404)
+      if printf '%s' "$CF_BODY" | grep -qiE 'token|authoriz|header'; then
+        warn "Cloudflare did not accept the token. Paste all of it. See $CF_GUIDE, step 5."
+      else
+        warn "Cloudflare does not know this Zone ID. Copy the Zone ID again (not the Account ID)."
+        warn "See $CF_GUIDE, step 4."
+      fi ;;
+    *) warn "Cloudflare answered $CF_STATUS: $(cf_field message)" ;;
+  esac
+}
+cf_find_zone() { # cf_find_zone DOMAIN: the zone holding it (itself or a parent) -> CF_ZONE_ID, CF_ZONE_NAME
+  local name=$1
+  CF_ZONE_ID=""; CF_ZONE_NAME=""
+  while [[ "$name" == *.* ]]; do
+    if cf GET "/zones?name=$name"; then
+      if printf '%s' "$CF_BODY" | grep -q "\"name\"[[:space:]]*:[[:space:]]*\"$name\""; then
+        CF_ZONE_ID=$(cf_field id); CF_ZONE_NAME=$name
+        [[ "$CF_ZONE_ID" =~ ^[0-9a-f]{32}$ ]] && return 0
+        CF_ZONE_ID=""
+      fi
+    else
+      return 1 # the token itself was refused: looking further up will not help
+    fi
+    name=${name#*.}
+  done
+  return 1
+}
+cf_verify() { # may the token read and change this zone's records, and is the zone the right, active one?
+  local zone=$CLOUDFLARE_ZONE_ID probe="_nova-setup-check.$ROOT_DOMAIN" id got status servers
+  if ! cf GET "/zones/$zone/dns_records?per_page=1"; then cf_refused; return 1; fi
+  good "The token and the Zone ID belong together."
+  if cf GET "/zones/$zone"; then
+    got=$(cf_field name); status=$(cf_field status)
+    if [ -n "$got" ] && [ "$got" != "$ROOT_DOMAIN" ] && [[ "$ROOT_DOMAIN" != *".$got" ]]; then
+      warn "This Zone ID belongs to $got, but your domain is $ROOT_DOMAIN. Copy the Zone ID of"
+      warn "the right domain. See $CF_GUIDE, step 4."
+      return 1
+    fi
+    if [ -n "$status" ] && [ "$status" != active ]; then
+      servers=$(printf '%s' "$CF_BODY" | grep -o '"name_servers"[[:space:]]*:[[:space:]]*\[[^]]*\]' | grep -o '"[a-z0-9.-]*\.[a-z]*"' | tr -d '"' | paste -sd' ' - || true)
+      warn "The domain is not active at Cloudflare yet (status: $status). At your registrar, set"
+      warn "the nameservers to: ${servers:-the two Cloudflare gave you}. Then wait: certificates"
+      warn "cannot be issued until it is active. See $CF_GUIDE, step 3."
+    else
+      good "The domain is active at Cloudflare."
+    fi
+  fi
+  if [ "$DRY" = 1 ]; then note "(dry run: not adding a test record)"; return 0; fi
+  if cf POST "/zones/$zone/dns_records" "{\"type\":\"TXT\",\"name\":\"$probe\",\"content\":\"\\\"nova-$(secret 6)\\\"\",\"ttl\":60}"; then
+    id=$(cf_field id); got=$(cf_field name)
+    [ -z "$id" ] || cf DELETE "/zones/$zone/dns_records/$id" || true
+    if [ -n "$got" ] && [ "$got" != "$probe" ]; then
+      warn "This Zone ID belongs to ${got#"$probe".}, but your domain is $ROOT_DOMAIN. Copy the"
+      warn "Zone ID of the right domain. See $CF_GUIDE, step 4."
+      return 1
+    fi
+    good "The token can change the domain's records (a test record was added and removed)."
+  elif [ "$CF_STATUS" = 403 ] || [ "$CF_STATUS" = 401 ]; then
+    warn "The token can read but not change records. Create a new one from the \"Edit zone DNS\""
+    warn "template. See $CF_GUIDE, step 5."
+    return 1
+  else
+    warn "Cloudflare refused a test record ($CF_STATUS: $(cf_field message))."
+    return 1
+  fi
+}
+cf_point() { # cf_point NAME IP: add the record if it is missing; never change one that is there
+  local name=$1 ip=$2 type=A have
+  [[ "$ip" == *:* ]] && type=AAAA
+  if ! cf GET "/zones/$CLOUDFLARE_ZONE_ID/dns_records?type=$type&name=$name"; then
+    warn "Could not look up $name at Cloudflare; add it yourself: $type $name -> $ip (grey cloud)."
+    return 0
+  fi
+  have=$(cf_field content)
+  if [ "$have" = "$ip" ]; then
+    good "$name already points to $ip."
+  elif [ -n "$have" ]; then
+    warn "$name points to $have, not $ip. Left as it is: change it at Cloudflare if that is wrong."
+  elif [ "$DRY" = 1 ]; then
+    note "(dry run) would add: $type $name -> $ip"
+  elif cf POST "/zones/$CLOUDFLARE_ZONE_ID/dns_records" "{\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$ip\",\"ttl\":1,\"proxied\":false}"; then
+    good "Added $name -> $ip (grey cloud, DNS only)."
+  else
+    warn "Cloudflare did not add $name ($CF_STATUS: $(cf_field message)). Add it yourself: $type $name -> $ip."
+  fi
+}
+public_ip() { curl -s -m 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' || true; }
+
 # ---------------------------------------------------------------- the platform
 
 setup_platform() {
@@ -107,25 +255,57 @@ setup_platform() {
 
   bold "1. Your domain"
   note "Stations get <name>.DOMAIN; the API is api.DOMAIN, the dashboard app.DOMAIN, TURN turn.DOMAIN."
-  ask_required ROOT_DOMAIN "Domain" "$(old ROOT_DOMAIN)"
-  ROOT_DOMAIN=${ROOT_DOMAIN,,}; ROOT_DOMAIN=${ROOT_DOMAIN%.}
+  ask_domain ROOT_DOMAIN "Domain" "$(old ROOT_DOMAIN)"
 
   bold "2. DNS for station names"
-  note "cloudflare: station names and their certificates work (needs a Cloudflare API token"
-  note "            with Zone.DNS:Edit on this domain, and the zone's id)."
+  note "cloudflare: station names and their certificates work. The free Cloudflare plan is"
+  note "            enough. You need an API token that may edit this domain's DNS."
+  note "            Never done this? $CF_GUIDE goes through it step by step."
   note "memory:     no Cloudflare. Station names are NOT published and their certificates"
   note "            fail; the dashboard and the TURN relay still work."
   choose DNS_PROVIDER "DNS provider" "$(old DNS_PROVIDER cloudflare)" cloudflare memory
-  CLOUDFLARE_API_TOKEN=""; CLOUDFLARE_ZONE_ID=""
+  CLOUDFLARE_API_TOKEN=""; CLOUDFLARE_ZONE_ID=""; CF_OK=0
   if [ "$DNS_PROVIDER" = cloudflare ]; then
-    ask_required CLOUDFLARE_API_TOKEN "Cloudflare API token" "$(old CLOUDFLARE_API_TOKEN)"
-    ask_required CLOUDFLARE_ZONE_ID "Cloudflare zone id" "$(old CLOUDFLARE_ZONE_ID)"
+    local again
+    while :; do
+      ask_secret CLOUDFLARE_API_TOKEN "Cloudflare API token" "$(old CLOUDFLARE_API_TOKEN)"
+      if ! command -v curl >/dev/null 2>&1; then
+        ask_required CLOUDFLARE_ZONE_ID "Cloudflare Zone ID" "$(old CLOUDFLARE_ZONE_ID)"
+        warn "curl is not installed, so the token was not tested. Later: ./setup.sh check"
+        break
+      fi
+      note "Asking Cloudflare about $ROOT_DOMAIN..."
+      if cf_find_zone "$ROOT_DOMAIN"; then
+        good "Found $CF_ZONE_NAME at Cloudflare; its Zone ID is $CF_ZONE_ID."
+        CLOUDFLARE_ZONE_ID=$CF_ZONE_ID
+      elif [ "$CF_STATUS" = 200 ] || [ "$CF_STATUS" = 403 ]; then
+        note "This token cannot look the Zone ID up. It is on the domain's Overview page at"
+        note "Cloudflare, lower right, under API ($CF_GUIDE, step 4)."
+        ask_required CLOUDFLARE_ZONE_ID "Cloudflare Zone ID" "$(old CLOUDFLARE_ZONE_ID)"
+      else
+        CLOUDFLARE_ZONE_ID=$(old CLOUDFLARE_ZONE_ID)
+      fi
+      if [ -n "$CLOUDFLARE_ZONE_ID" ] && cf_verify; then CF_OK=1; break; fi
+      [ -n "$CLOUDFLARE_ZONE_ID" ] || cf_refused
+      [ "$INPUT_ENDED" = 1 ] && again=no || choose again "Enter the token again" yes yes no
+      if [ "$again" = no ]; then
+        [ -n "$CLOUDFLARE_ZONE_ID" ] || ask_required CLOUDFLARE_ZONE_ID "Cloudflare Zone ID" "$(old CLOUDFLARE_ZONE_ID)"
+        warn "Going on with these values. Station names will not work until this is fixed;"
+        warn "test again any time with: ./setup.sh check"
+        break
+      fi
+    done
   else
     warn "Memory DNS: station names will not resolve on the internet. Fine for the relay; not for names."
   fi
 
   bold "3. Certificates (Let's Encrypt)"
-  ask_required ACME_EMAIL "Email for Let's Encrypt notices" "$(old ACME_EMAIL "ops@$ROOT_DOMAIN")"
+  while :; do
+    ask_required ACME_EMAIL "Email for Let's Encrypt notices" "$(old ACME_EMAIL "ops@$ROOT_DOMAIN")"
+    [[ "$ACME_EMAIL" == ?*@?*.?* ]] && break
+    [ "$INPUT_ENDED" = 1 ] && fail "\"$ACME_EMAIL\" is not an email address."
+    warn "That does not look like an email address."
+  done
   local was_prod=staging
   [ "$(old ACME_DIRECTORY_URL)" = "https://acme-v02.api.letsencrypt.org/directory" ] && was_prod=production
   note "Start with staging (test certificates, generous limits); switch to production once it works."
@@ -208,13 +388,28 @@ YAML
     rm -f docker-compose.proxy.yml
   fi
 
-  bold "7. DNS records you make at your DNS provider"
-  local a
-  for name in "api.$ROOT_DOMAIN" "app.$ROOT_DOMAIN"; do
-    a=$(resolves_to "$name" || true)
-    note "$name -> ${a:-(not found yet)}   should be this site's public IP"
-  done
-  note "turn.$ROOT_DOMAIN -> the TURN machine's public IP (./setup.sh turn there)"
+  bold "7. The platform's own DNS records"
+  local a name ip="" add=no names=("api.$ROOT_DOMAIN" "app.$ROOT_DOMAIN")
+  [ "$MODE" = both ] && names+=("turn.$ROOT_DOMAIN")
+  if [ "$CF_OK" = 1 ]; then
+    note "${names[*]} must point at this site's public IP address."
+    choose add "Check them at Cloudflare, and add the missing ones" yes yes no
+  fi
+  if [ "$add" = yes ]; then
+    ask ip "This site's public IP" "$(public_ip)"
+    if [ -n "$ip" ]; then
+      for name in "${names[@]}"; do cf_point "$name" "$ip"; done
+    else
+      warn "No address given: add the records yourself ($CF_GUIDE, step 6)."
+    fi
+  else
+    for name in "${names[@]}"; do
+      a=$(resolves_to "$name" || true)
+      note "$name -> ${a:-(not found yet)}   should be this site's public IP"
+    done
+    note "Add them at your DNS provider as A records, DNS only ($CF_GUIDE, step 6)."
+  fi
+  [ "$MODE" = both ] || note "turn.$ROOT_DOMAIN -> the TURN machine's public IP (add it by hand; then ./setup.sh turn there)"
 
   bold "8. Starting"
   run "${compose[@]}" config --quiet
@@ -237,7 +432,10 @@ YAML
   else
     note "Ports 80 and 443 must reach this machine (port forward them on your router/firewall)."
   fi
-  note "Sign up at https://app.$ROOT_DOMAIN with an admin email."
+  note "Sign up at https://app.$ROOT_DOMAIN with an admin email. Admin > Setup there shows"
+  note "what is unfinished, the Cloudflare guide, and a button that tests the connection."
+  [ "$ACME_MODE" = staging ] && note "Certificates are test ones for now: once a station works, run this again and choose production."
+  note "To test this setup at any time: ./setup.sh check"
   note "On the TURN machine: ./setup.sh turn, with these values:"
   note "  TURN_SHARED_SECRET=$TURN_SHARED_SECRET"
   note "  TURN_USAGE_TOKEN=$TURN_USAGE_TOKEN"
@@ -257,8 +455,7 @@ setup_turn() {
   load_old deploy/turn/.env
   need_docker
 
-  ask_required ROOT_DOMAIN "Domain (as on the platform)" "$(old ROOT_DOMAIN)"
-  ROOT_DOMAIN=${ROOT_DOMAIN,,}; ROOT_DOMAIN=${ROOT_DOMAIN%.}
+  ask_domain ROOT_DOMAIN "Domain (as on the platform)" "$(old ROOT_DOMAIN)"
   ask_required TURN_HOST "This relay's name" "$(old TURN_HOST "turn.$ROOT_DOMAIN")"
   ask_required API_BASE "The platform's API" "$(old API_BASE "https://api.$ROOT_DOMAIN")"
   note "The next two come from the platform's .env (setup.sh printed them)."
@@ -325,6 +522,90 @@ setup_turn() {
   note "Logs: docker compose -f deploy/turn/docker-compose.yml logs -f"
 }
 
+# ---------------------------------------------------------------- check
+
+setup_check() {
+  bold "Checking this platform's setup"
+  [ -f .env ] || fail "There is no .env here yet: run ./setup.sh first."
+  load_old .env
+  ROOT_DOMAIN=$(old ROOT_DOMAIN); DNS_PROVIDER=$(old DNS_PROVIDER cloudflare)
+  CLOUDFLARE_API_TOKEN=$(old CLOUDFLARE_API_TOKEN); CLOUDFLARE_ZONE_ID=$(old CLOUDFLARE_ZONE_ID)
+  local key a name code
+
+  bold "Settings (.env)"
+  for key in ROOT_DOMAIN DATABASE_URL POSTGRES_PASSWORD SESSION_SECRET TURN_SHARED_SECRET ACME_EMAIL; do
+    [ -n "$(old "$key")" ] && [ "$(old "$key")" != change-me ] || bad "$key is not set."
+  done
+  [ "$PROBLEMS" = 0 ] && good "The values that must be set are set."
+  [ -n "$ROOT_DOMAIN" ] || fail "Without ROOT_DOMAIN nothing else can be checked."
+  if [ "$(old ACME_DIRECTORY_URL)" = "https://acme-v02.api.letsencrypt.org/directory" ]; then
+    good "Certificates come from Let's Encrypt (production)."
+  else
+    warn "Certificates are test certificates (staging): browsers warn about them. Run ./setup.sh and choose production once a station works."
+  fi
+  [ -n "$(old SMTP_URL)" ] && good "Email is sent through your SMTP server." || warn "No SMTP address: confirmation links are only written to the dashboard's log."
+  [ -n "$(old ADMIN_EMAILS)" ] && good "Admins: $(old ADMIN_EMAILS)" || bad "ADMIN_EMAILS is empty: nobody becomes an admin."
+
+  bold "DNS for station names"
+  if [ "$DNS_PROVIDER" != cloudflare ]; then
+    bad "DNS_PROVIDER is $DNS_PROVIDER: station names are not published. Run ./setup.sh and choose cloudflare ($CF_GUIDE)."
+  elif ! command -v curl >/dev/null 2>&1; then
+    warn "curl is not installed, so Cloudflare was not tested. The dashboard can: Admin > Setup."
+  elif [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ZONE_ID" ]; then
+    bad "CLOUDFLARE_API_TOKEN or CLOUDFLARE_ZONE_ID is empty. Run ./setup.sh ($CF_GUIDE)."
+  elif cf_verify; then
+    :
+  else
+    PROBLEMS=$((PROBLEMS + 1))
+  fi
+
+  bold "The platform's own addresses"
+  for name in "api.$ROOT_DOMAIN" "app.$ROOT_DOMAIN" "$(old TURN_HOST "turn.$ROOT_DOMAIN")"; do
+    a=$(resolves_to "$name" || true)
+    if [ -n "$a" ]; then
+      good "$name -> $a   (check that this is the right machine's public address)"
+    else
+      bad "$name is not found. Add an A record for it, DNS only ($CF_GUIDE, step 6)."
+    fi
+  done
+
+  bold "Containers"
+  local compose=(docker compose -f docker-compose.yml) want=(postgres api dashboard worker) running svc
+  if [ -f docker-compose.proxy.yml ]; then compose+=(-f docker-compose.proxy.yml); else want+=(caddy); fi
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    warn "Docker is not available to this user, so the containers were not checked."
+  else
+    running=$("${compose[@]}" ps --services --status running 2>/dev/null || true)
+    for svc in "${want[@]}"; do
+      printf '%s\n' "$running" | grep -qx "$svc" && good "$svc is running." || bad "$svc is not running: ${compose[*]} logs $svc"
+    done
+    if printf '%s\n' "$running" | grep -qx api; then
+      if "${compose[@]}" exec -T api node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))" >/dev/null 2>&1; then
+        good "The API answers on this machine."
+      else
+        bad "The API does not answer: ${compose[*]} logs api migrate"
+      fi
+    fi
+  fi
+
+  bold "From the internet"
+  if command -v curl >/dev/null 2>&1; then
+    for name in "api.$ROOT_DOMAIN" "app.$ROOT_DOMAIN"; do
+      code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$name/healthz" 2>/dev/null || true)
+      [ "$code" = 200 ] && good "https://$name answers." || bad "https://$name does not answer ($([ "${code:-000}" = 000 ] && echo "no reply" || echo "it said $code")). Check its DNS record, ports 80/443 and the proxy in front."
+    done
+  else
+    warn "curl is not installed, so this was not checked."
+  fi
+
+  if [ "$PROBLEMS" = 0 ]; then
+    bold "All good."
+  else
+    bold "$PROBLEMS thing(s) to fix: see the red lines above."
+    exit 1
+  fi
+}
+
 # ---------------------------------------------------------------- start
 
 if [ -z "$MODE" ]; then
@@ -332,12 +613,14 @@ if [ -z "$MODE" ]; then
   note "platform: the API, dashboard, worker and database"
   note "turn:     the audio relay (needs its own public address)"
   note "both:     everything on one machine with a public address"
-  choose MODE "Set up" platform platform turn both
+  note "check:    change nothing; test a setup that is already there"
+  choose MODE "Set up" platform platform turn both check
 fi
 [ "$DRY" = 1 ] && note "(dry run: settings files are written, nothing is started)"
 case "$MODE" in
   platform) setup_platform ;;
   turn) setup_turn ;;
   both) setup_platform; OLD=(); setup_turn ;;
+  check) setup_check ;;
 esac
 cd "$HERE"
