@@ -171,7 +171,7 @@ describe("Admin > Setup", () => {
   it("without Cloudflare, says so on the overview and still shows the guide", async () => {
     const { app, cookie } = await signedIn({ dnsProvider: "memory" });
     const overview = await app.inject({ method: "GET", url: "/admin", headers: { cookie } });
-    expect(overview.body).toContain("Setup not finished");
+    expect(overview.body).toContain("Setup is not finished");
     expect(overview.body).toContain("station names are not published");
     const page = await app.inject({ method: "GET", url: "/admin/setup", headers: { cookie } });
     expect(page.body).toContain("Station names are not published on the internet");

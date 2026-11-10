@@ -111,3 +111,15 @@ function blocks(lines: string[]): string {
 export function markdown(source: string): Html {
   return new Html(blocks(source.replace(/\r\n?/g, "\n").split("\n")));
 }
+
+/** The guide's sections (its `##` headings), with the ids `markdown` gives them: for a table of contents. */
+export function headings(source: string): { id: string; text: string }[] {
+  const out: { id: string; text: string }[] = [];
+  let fenced = false;
+  for (const line of source.replace(/\r\n?/g, "\n").split("\n")) {
+    if (line.startsWith("```")) fenced = !fenced;
+    const h = fenced ? null : /^##\s+(.*)$/.exec(line);
+    if (h) out.push({ id: slug(h[1]), text: h[1].replace(/[`*]/g, "") });
+  }
+  return out;
+}
