@@ -16,7 +16,12 @@ connection fails): presenters' browsers connect straight to Nova.
 | coturn | `turn.ROOT_DOMAIN` | STUN/TURN on its own host, with a usage shipper |
 
 Stack: TypeScript on Node 22, Fastify, PostgreSQL 16, acme-client, coturn, Caddy, Docker
-Compose. DNS: Cloudflare.
+Compose. DNS: Cloudflare (the free plan is enough).
+
+**New to Cloudflare?** [docs/cloudflare-setup.md](docs/cloudflare-setup.md) goes from "I
+have a domain" to a working setup, step by step, with no DNS knowledge needed. Admins
+see the same guide in the dashboard under **Admin > Setup**, next to a button that tests
+the Cloudflare connection.
 
 ## Deploy
 
@@ -36,6 +41,18 @@ default there, clear of the ports Windows gives Nova) and a TLS port off 443
 (`TURN_TLS_PORT`, 5349), and prints the port forwards to make.
 `--dry-run` writes the files and shows the commands without starting anything. Run it
 again to change an answer; secrets are kept.
+
+For Cloudflare it asks only for the API token: it finds the zone id itself (when
+`ROOT_DOMAIN` is a subdomain, the parent's zone), tests that the token can read and change
+the zone's records (one test record, added and removed), says in plain words what is wrong
+if not, and offers to add the `api` and `app` records (never changing one that exists).
+This part needs `curl`.
+
+**`./setup.sh check`** changes nothing and tests a setup that is already there: the
+settings, the Cloudflare token, the platform's DNS records, the containers, and whether
+the API and dashboard answer from the internet. The dashboard's **Admin > Setup** page
+shows the same things to admins: what is unfinished (no DNS provider, test certificates,
+no email), the Cloudflare test, and the guide.
 
 By hand:
 
@@ -109,7 +126,8 @@ JSON over HTTPS. Errors are `{"error": {"code", "message"}}`. Authenticated call
 | Where | What |
 | --- | --- |
 | `src/api/` | the studio API (`studio.ts`), Fastify app, metrics |
-| `src/dashboard/` | customer pages (`app.ts`), admin pages (`admin.ts`), sessions and CSRF |
+| `src/dashboard/` | customer pages (`app.ts`), admin pages (`admin.ts`), sessions and CSRF, the guides' Markdown |
+| `docs/` | guides for people setting the platform up (also shown in the dashboard) |
 | `src/lib/` | name rules, access codes and secrets, rate limits, audit, subdomain actions |
 | `src/dns/` | DNS manager (protected names, only-on-change, retries) and providers |
 | `src/acme/` | certificates by DNS-01, ARI renewals, the weekly-limit queue, revocation |
@@ -136,7 +154,7 @@ Choices made where the spec left room:
 On a Linux machine with a real PostgreSQL 16, Pebble (Let's Encrypt's test CA) with its
 challenge DNS server, coturn 4.6.1, and a real Nova engine:
 
-- 53 automated tests (`npm test`), including: the racing claim (exactly one of eight
+- 59 automated tests (`npm test`), including: the racing claim (exactly one of eight
   wins), register/DNS/CSR/probe/ICE against the contract, rename / regenerate / suspend /
   delete as the studio sees them, certificates issued, renewed with ARI and revoked
   through Pebble, the weekly-limit queue, the dashboard driven like a browser (cookies,
@@ -153,7 +171,8 @@ challenge DNS server, coturn 4.6.1, and a real Nova engine:
 
 Not verified here:
 
-- **Cloudflare** for real (the provider is tested against its API shape only) and **Let's
+- **Cloudflare** for real (the provider, the connection test and `setup.sh`'s Cloudflare
+  steps are tested against a stand-in with its API shape only) and **Let's
   Encrypt** for real (Pebble is its test CA; staging is the next step).
 - **The Docker images**: the Compose files validate, but Docker Hub refused the image pull
   in the build environment (rate limited), so the images were not built there.

@@ -18,7 +18,7 @@ import { checkName, fqdnOf, normaliseLabel } from "../lib/names.js";
 import { decrypt, dummyHash, encrypt, hashSecret, newToken, newTotpSecret, tokenHash, totpUri, verifySecret, verifyTotp } from "../lib/secrets.js";
 import * as subs from "../lib/subdomains.js";
 import { adminRoutes } from "./admin.js";
-import { APP_JS, bytes, csrfField, html, page, when, type Html } from "./html.js";
+import { APP_JS, bytes, csrfField, html, page, raw, when, type Html } from "./html.js";
 import { COOKIE, csrfOk, endSession, loadSession, preToken, startSession, type Session } from "./session.js";
 
 export interface DashDeps {
@@ -26,6 +26,8 @@ export interface DashDeps {
   dns: DnsManager;
   config: Config;
   mail: Mailer;
+  /** The addresses a name has on the public internet (the setup page; tests replace it). */
+  lookup?: (name: string) => Promise<string[]>;
 }
 
 type Form = Record<string, string>;
@@ -68,7 +70,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
 
   const render = (req: FastifyRequest, reply: FastifyReply, title: string, body: Html, flash: Flash = null, status = 200) => {
     const s = req.session && !req.session.needsTotp ? req.session : null;
-    return reply.status(status).type("text/html; charset=utf-8").send(page({ title, user: s?.user, csrf: s?.csrf, flash, rootDomain: d.config.rootDomain }, body));
+    return reply.status(status).type("text/html; charset=utf-8").send(page({ title, user: s?.user, csrf: s?.csrf, flash, rootDomain: d.config.rootDomain, path: req.url }, body));
   };
   const form = (req: FastifyRequest): Form => (req.body ?? {}) as Form;
   const pre = (req: FastifyRequest, reply: FastifyReply) => csrfField(req.session?.csrf ?? preToken(req, reply, secure));
@@ -333,13 +335,13 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
         WHERE s.user_id = $1 ORDER BY s.label`, [s.user.id])).rows;
     const room = rows.length < d.config.subdomainLimit;
     return render(req, reply, "My stations", html`
-      ${!s.user.verified ? html`<div class="card"><b>Confirm your email</b> to claim a station. <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button>Send the link again</button></form></div>` : ""}
+      ${!s.user.verified ? html`<div class="card notice"><b>Confirm your email</b> to claim a station. We sent a link to ${s.user.email}. <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button>Send the link again</button></form></div>` : ""}
       <div class="card"><h1>My stations</h1>
-      ${rows.length ? html`<table><tr><th>Address</th><th>Status</th><th>Last seen</th><th></th></tr>${rows.map((r) => html`<tr>
+      ${rows.length ? html`<table><tr><th>Address</th><th>Status</th><th class="wide-only">Last seen</th><th class="wide-only"></th></tr>${rows.map((r) => html`<tr>
         <td><a href="/stations/${r.id}">${fqdnOf(r.label, d.config.rootDomain)}</a></td>
-        <td>${statusChip(r.status, r.last_seen_at)}</td><td>${when(r.last_seen_at)}</td><td><a href="/stations/${r.id}">Manage</a></td></tr>`)}</table>`
-        : html`<p class="dim">No station yet.</p>`}
-      ${room && s.user.verified ? html`<p><a class="btn primary" href="/stations/new">Claim a station address</a></p>` : room ? "" : html`<p class="dim">Your plan allows ${d.config.subdomainLimit}.</p>`}
+        <td>${statusChip(r.status, r.last_seen_at)}</td><td class="wide-only">${when(r.last_seen_at)}</td><td class="wide-only"><a href="/stations/${r.id}">Manage</a></td></tr>`)}</table>`
+        : html`<div class="empty"><p>No station yet. Claim an address like <b>kfm.${d.config.rootDomain}</b>, then enter its access code in Nova.</p></div>`}
+      ${room && s.user.verified ? html`<p class="row"${rows.length ? "" : raw(' style="justify-content:center"')}><a class="btn primary" href="/stations/new">Claim a station address</a></p>` : room ? "" : html`<p class="dim row">Your plan allows ${d.config.subdomainLimit} station${d.config.subdomainLimit === 1 ? "" : "s"}.</p>`}
       </div>`, takeFlash(req, reply));
   });
 
@@ -348,8 +350,8 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     if (!s) return reply;
     return render(req, reply, "Claim an address", html`<div class="card"><h1>Claim your station's address</h1>
       <form method="post" action="/stations">${csrfField(s.csrf)}
-        <label for="label">Name</label><input id="label" name="label" required autocomplete="off" spellcheck="false" placeholder="kfm" maxlength="63">
-        <span class="dim">.${d.config.rootDomain}</span><div id="name-state" aria-live="polite"></div>
+        <label for="label">Name</label><div class="row" style="margin-top:0;gap:8px;flex-wrap:nowrap"><input id="label" name="label" required autocomplete="off" spellcheck="false" placeholder="kfm" maxlength="63" style="max-width:260px">
+        <span class="dim">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>
         <p class="dim">3–63 lowercase letters, digits and hyphens; not starting or ending with a hyphen.</p>
         <div class="row"><button class="primary">Claim</button><a href="/">Cancel</a></div></form></div>`, takeFlash(req, reply));
   });
@@ -386,7 +388,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const cert = (await d.db.query("SELECT status, expires_at, error FROM certificates WHERE subdomain_id = $1 AND status IN ('pending', 'issued', 'failed') ORDER BY created_at DESC LIMIT 1", [st.id])).rows[0];
     const usage = (await d.db.query("SELECT coalesce(sum(bytes_relayed), 0)::bigint AS b, coalesce(sum(sessions), 0)::int AS n FROM turn_usage WHERE studio_id = $1 AND day >= date_trunc('month', current_date)", [st.studio_id])).rows[0];
     const url = `https://${fqdnOf(st.label, d.config.rootDomain)}${st.last_port && st.last_port !== 443 ? `:${st.last_port}` : ""}`;
-    return render(req, reply, st.label, html`<div class="card"><h1>${fqdnOf(st.label, d.config.rootDomain)}</h1>
+    return render(req, reply, st.label, html`<p><a href="/">← My stations</a></p><div class="card"><h1>${fqdnOf(st.label, d.config.rootDomain)}</h1>
       <div class="grid">
         <span class="dim">Address for presenters</span><span><code>${url}</code> <button type="button" data-copy="${url}">Copy</button></span>
         <span class="dim">Status</span><span>${statusChip(st.status, st.last_seen_at)}</span>
@@ -397,13 +399,13 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
         <span class="dim">Audio relay this month</span><span>${bytes(Number(usage.b))} in ${usage.n} session${usage.n === 1 ? "" : "s"}</span>
       </div></div>
       ${st.status === "suspended" ? html`<div class="card bad">This station is suspended by the platform. Contact support.</div>` : html`
-      <div class="card"><h2>Rename</h2><p class="dim">The old name is held for 30 days and then released. Nova picks up the new name on its next check-in (within 5 minutes) and gets a new certificate.</p>
+      <div class="cols"><div class="card"><h2>Rename</h2><p class="dim">The old name is held for 30 days and then released. Nova picks up the new name on its next check-in (within 5 minutes) and gets a new certificate.</p>
         <form method="post" action="/stations/${st.id}/rename" data-confirm="Rename ${st.label}? Presenters will need the new address.">${csrfField(s.csrf)}
           <label for="label">New name</label><input id="label" name="label" required autocomplete="off" maxlength="63"><div id="name-state" aria-live="polite"></div>
           <div class="row"><button>Rename</button></div></form></div>
       <div class="card"><h2>Access code</h2><p class="dim">Make a new code if the old one may have leaked. The old code, and every Nova signed in with it, stop working at once; enter the new code in Nova.</p>
-        <form method="post" action="/stations/${st.id}/regenerate" data-confirm="Make a new access code? Nova will need it entered again.">${csrfField(s.csrf)}<button>Make a new access code</button></form></div>`}
-      <div class="card"><h2>Delete</h2><p class="dim">Removes the address, its certificate and every sign-in; the name is held for 30 days.</p>
+        <form method="post" action="/stations/${st.id}/regenerate" data-confirm="Make a new access code? Nova will need it entered again.">${csrfField(s.csrf)}<button>Make a new access code</button></form></div></div>`}
+      <div class="card danger"><h2>Delete</h2><p class="dim">Removes the address, its certificate and every sign-in; the name is held for 30 days.</p>
         <form method="post" action="/stations/${st.id}/delete">${csrfField(s.csrf)}<label for="confirm">Type <b>${st.label}</b> to confirm</label><input id="confirm" name="confirm" required autocomplete="off">
         <div class="row"><button class="danger">Delete this station</button></div></form></div>`, takeFlash(req, reply));
   });

@@ -4,3 +4,4 @@ dist
 test
 deploy
 *.md
+!docs/*.md
