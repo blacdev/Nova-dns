@@ -85,6 +85,8 @@ button.danger{border-color:color-mix(in srgb,var(--bad) 60%,var(--line));color:v
 form.inline{display:inline}.row{display:flex;gap:10px 12px;align-items:center;flex-wrap:wrap;margin-top:16px}
 form[method=get]{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}form[method=get] input{flex:1;min-width:180px}
 main.narrow input{max-width:none}main.narrow .row{justify-content:space-between}
+input[type=number]{width:110px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+label.check{display:flex;gap:10px;align-items:flex-start;font-weight:400;font-size:14px;margin:8px 0}label.check input{margin-top:3px}
 
 /* tables and lists of facts */
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -120,7 +122,7 @@ header nav{order:3;flex-basis:100%;flex-wrap:nowrap;overflow-x:auto;margin:0 -6p
 `;
 
 export function page(f: Frame, body: Html): string {
-  const admin = f.user?.role === "admin";
+  const admin = f.user?.role === "admin" || f.user?.role === "superadmin";
   const path = (f.path ?? "").split("?")[0];
   const at = path.startsWith("/admin") ? "admin" : path.startsWith("/account") ? "account" : "stations";
   const link = (href: string, key: string, text: string) => html`<a href="${href}"${at === key ? raw(' aria-current="page"') : ""}>${text}</a>`;

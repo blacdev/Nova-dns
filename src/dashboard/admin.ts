@@ -1,7 +1,8 @@
 /**
- * The admin dashboard (spec section 2): people and stations (search, suspend), reserved
- * and blocked names, certificates against the CA's weekly limit, TURN usage, the audit
- * log and DNS/ACME problems. Role `admin` only.
+ * The admin dashboard (spec section 2): stations (search, suspend), reserved and blocked
+ * names, certificates against the CA's weekly limit, TURN usage, the audit log and DNS/ACME
+ * problems. People, roles and plans are in admin-people.ts; settings in admin-settings.ts.
+ * Admins and the super admin only, each page behind its permission (rbac.ts).
  */
 
 import { Resolver } from "node:dns/promises";
@@ -9,7 +10,9 @@ import { readFileSync } from "node:fs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { DnsCheckStep } from "../dns/dns.js";
 import { audit } from "../lib/audit.js";
-import { formError, fqdnOf } from "../lib/names.js";
+import { formError, fqdnOf, normaliseLabel } from "../lib/names.js";
+import { can, isStaff, type Permission } from "../lib/rbac.js";
+import { LE_PRODUCTION } from "../lib/settings.js";
 import * as subs from "../lib/subdomains.js";
 import type { DashDeps, Helpers } from "./app.js";
 import { statusChip } from "./app.js";
@@ -17,7 +20,6 @@ import { bytes, csrfField, html, raw, when, type Html } from "./html.js";
 import { headings, markdown } from "./markdown.js";
 import type { Session } from "./session.js";
 
-const LE_PRODUCTION = "https://acme-v02.api.letsencrypt.org/directory";
 
 /** docs/cloudflare-setup.md, with the guide's example domain replaced by this platform's, beside its contents. */
 function cloudflareGuide(rootDomain: string): Html {
@@ -40,25 +42,42 @@ async function publicLookup(name: string): Promise<string[]> {
 
 const mark = (ok: boolean | null) => (ok === true ? html`<span class="ok">✓</span>` : ok === false ? html`<span class="bad">✗</span>` : html`<span class="dim">?</span>`);
 
-export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
-  const admin = (req: FastifyRequest, reply: FastifyReply): Session | null => {
+const TABS: [string, string, Permission | null][] = [["/admin", "Overview", null], ["/admin/users", "People", "users.view"], ["/admin/stations", "Stations", "stations.view"],
+  ["/admin/plans", "Plans", "plans.manage"], ["/admin/names", "Names", "names.manage"], ["/admin/certificates", "Certificates", "logs.view"], ["/admin/turn", "Audio relay", "logs.view"],
+  ["/admin/audit", "Audit log", "logs.view"], ["/admin/operations", "DNS / ACME problems", "logs.view"], ["/admin/settings", "Settings", "settings.manage"], ["/admin/setup", "Setup", "settings.manage"]];
+
+/** The tab bar above every admin page: the pages this person may open, the one shown marked. */
+export function adminTabs(req: FastifyRequest, s: Session): Html {
+  const mine = TABS.filter(([, , p]) => !p || can(s.user, p));
+  const path = req.url.split("?")[0];
+  const here = mine.filter(([href]) => path === href || path.startsWith(`${href}/`)).sort((x, y) => y[0].length - x[0].length)[0]?.[0];
+  return html`<nav class="tabs" aria-label="Admin">${mine.map(([href, text]) => html`<a href="${href}"${href === here ? raw(' aria-current="page"') : ""}>${text}</a>`)}</nav>`;
+}
+
+/**
+ * The check at the top of every admin route: signed in, an admin (else "Not found", as if
+ * the page did not exist), and holding `perm` (else "Not allowed").
+ */
+export function adminGuard(h: Helpers) {
+  return (req: FastifyRequest, reply: FastifyReply, perm: Permission | null = null): Session | null => {
     const s = h.signedIn(req, reply);
     if (!s) return null;
-    if (s.user.role !== "admin") {
+    if (!isStaff(s.user)) {
       void h.render(req, reply, "Not found", html`<div class="card"><h1>Not found</h1></div>`, null, 404);
+      return null;
+    }
+    if (perm && !can(s.user, perm)) {
+      void h.render(req, reply, "Not allowed", html`${adminTabs(req, s)}<div class="card"><h1>Not allowed</h1><p>Your account may not do this. The super admin can change what you may do.</p></div>`, null, 403);
       return null;
     }
     return s;
   };
+}
+
+export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
+  const admin = adminGuard(h);
   const q = (req: FastifyRequest) => String((req.query as Record<string, string>).q ?? "").trim().toLowerCase();
-  const TABS: [string, string][] = [["/admin", "Overview"], ["/admin/users", "People"], ["/admin/stations", "Stations"], ["/admin/names", "Names"],
-    ["/admin/certificates", "Certificates"], ["/admin/turn", "Audio relay"], ["/admin/audit", "Audit log"], ["/admin/operations", "DNS / ACME problems"], ["/admin/setup", "Setup"]];
-  /** The tab bar above every admin page, with the page being shown marked. */
-  const tabs = (req: FastifyRequest) => {
-    const path = req.url.split("?")[0];
-    const here = TABS.filter(([href]) => path === href || path.startsWith(`${href}/`)).sort((x, y) => y[0].length - x[0].length)[0]?.[0];
-    return html`<nav class="tabs" aria-label="Admin">${TABS.map(([href, text]) => html`<a href="${href}"${href === here ? raw(' aria-current="page"') : ""}>${text}</a>`)}</nav>`;
-  };
+  const tabs = (req: FastifyRequest) => adminTabs(req, req.session!);
   const unfinished = () => [
     d.config.dnsProvider === "memory" ? "station names are not published (no DNS provider)" : "",
     d.config.dnsProvider !== "challtestsrv" && d.config.acmeDirectoryUrl !== LE_PRODUCTION ? "certificates are test certificates (Let's Encrypt staging)" : "",
@@ -69,14 +88,16 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const s = admin(req, reply);
     if (!s) return reply;
     const n = async (sql: string) => Number((await d.db.query(sql)).rows[0].n);
-    const todo = unfinished();
+    const todo = can(s.user, "settings.manage") ? unfinished() : [];
+    const role = s.user.role === "superadmin" ? "the super admin: you may do everything, and decide what other admins may do" : "an admin";
     return h.render(req, reply, "Admin", html`${tabs(req)}
-      ${todo.length ? html`<div class="card notice"><b>Setup is not finished:</b> ${todo.join("; ")}. <a href="/admin/setup">Open Setup</a></div>` : ""}
+      ${todo.length ? html`<div class="card notice"><b>Setup is not finished:</b> ${todo.join("; ")}. <a href="/admin/settings">Open Settings</a></div>` : ""}
+      <p class="dim">You are ${role}.</p>
       <div class="stats">
-        <a class="stat" href="/admin/users"><b>${await n("SELECT count(*) AS n FROM users")}</b><span>People</span></a>
-        <a class="stat" href="/admin/stations"><b>${await n("SELECT count(*) AS n FROM subdomains")}</b><span>Stations · ${await n("SELECT count(*) AS n FROM studios WHERE online")} online · ${await n("SELECT count(*) AS n FROM subdomains WHERE status = 'suspended'")} suspended</span></a>
-        <a class="stat" href="/admin/certificates"><b>${await n("SELECT count(*) AS n FROM certificates WHERE issued_at > now() - interval '7 days' AND renews_id IS NULL")} <span>of ${d.config.certWeeklyLimit}</span></b><span>New certificates, 7 days</span></a>
-        <a class="stat" href="/admin/operations"><b>${await n("SELECT count(*) AS n FROM ops_events WHERE level = 'error' AND created_at > now() - interval '1 day'")}</b><span>Problems, 24 h</span></a>
+        ${can(s.user, "users.view") ? html`<a class="stat" href="/admin/users"><b>${await n("SELECT count(*) AS n FROM users")}</b><span>People</span></a>` : ""}
+        ${can(s.user, "stations.view") ? html`<a class="stat" href="/admin/stations"><b>${await n("SELECT count(*) AS n FROM subdomains")}</b><span>Stations · ${await n("SELECT count(*) AS n FROM studios WHERE online")} online · ${await n("SELECT count(*) AS n FROM subdomains WHERE status = 'suspended'")} suspended</span></a>` : ""}
+        ${can(s.user, "logs.view") ? html`<a class="stat" href="/admin/certificates"><b>${await n("SELECT count(*) AS n FROM certificates WHERE issued_at > now() - interval '7 days' AND renews_id IS NULL")} <span>of ${d.config.certWeeklyLimit}</span></b><span>New certificates, 7 days</span></a>
+        <a class="stat" href="/admin/operations"><b>${await n("SELECT count(*) AS n FROM ops_events WHERE level = 'error' AND created_at > now() - interval '1 day'")}</b><span>Problems, 24 h</span></a>` : ""}
       </div>`, h.takeFlash(req, reply));
   });
 
@@ -89,10 +110,9 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const failed = tested?.dns?.some((x) => x.ok === false);
     return h.render(req, reply, "Setup", html`${tabs(req)}<div class="card"><h1>Setup</h1><div class="grid">
       <span class="dim">Domain</span><span>${c.rootDomain}</span>
-      <span class="dim">DNS provider</span><span>${cloudflare ? html`<span class="chip ok">Cloudflare</span>` : html`<span class="chip bad">${c.dnsProvider}</span> Station names are not published on the internet and their certificates fail. Set up Cloudflare with the guide below.`}</span>
-      <span class="dim">Certificates</span><span>${production ? html`<span class="chip ok">Let's Encrypt, production</span>` : html`<span class="chip bad">test certificates</span> Browsers warn about these. Once a station works, run <span class="mono">./setup.sh</span> again and choose production.`}</span>
-      <span class="dim">Email</span><span>${c.smtpUrl ? html`<span class="chip ok">sending</span> as ${c.mailFrom}` : html`<span class="chip bad">not sending</span> Confirmation and reset links are only written to the dashboard's log. Run <span class="mono">./setup.sh</span> again to add an SMTP address.`}</span>
-      <span class="dim">Admins</span><span>${c.adminEmails.join(", ") || "none named"}</span>
+      <span class="dim">DNS provider</span><span>${cloudflare ? html`<span class="chip ok">Cloudflare</span>` : html`<span class="chip bad">${c.dnsProvider}</span> Station names are not published on the internet and their certificates fail. Set up Cloudflare with the guide below, then add the token in <a href="/admin/settings">Settings</a>.`}</span>
+      <span class="dim">Certificates</span><span>${production ? html`<span class="chip ok">Let's Encrypt, production</span>` : html`<span class="chip bad">test certificates</span> Browsers warn about these. Once a station works, choose production in <a href="/admin/settings">Settings</a>.`}</span>
+      <span class="dim">Email</span><span>${c.smtpUrl ? html`<span class="chip ok">sending</span> as ${c.mailFrom}` : html`<span class="chip bad">not sending</span> Confirmation and reset links are only written to the dashboard's log. Add an SMTP address in <a href="/admin/settings">Settings</a>.`}</span>
       </div>
       <form method="post" action="/admin/setup/check">${csrfField(s.csrf)}<div class="row"><button class="primary">${cloudflare ? "Test the Cloudflare connection" : "Check the platform's addresses"}</button>
         <span class="dim">${cloudflare ? "Adds and removes one test record, and looks up the platform's own addresses." : "Looks up the platform's own addresses."}</span></div></form></div>
@@ -105,12 +125,12 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   };
 
   app.get("/admin/setup", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "settings.manage");
     if (!s) return reply;
     return setupPage(req, reply, s);
   });
   app.post("/admin/setup/check", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "settings.manage");
     if (!s) return reply;
     const lookup = d.lookup ?? publicLookup;
     const wanted = [`api.${d.config.rootDomain}`, `app.${d.config.rootDomain}`, d.config.turnHost];
@@ -122,66 +142,65 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return setupPage(req, reply, s, { dns, names });
   });
 
-  // ------------------------------------------------------------------ people
-
-  app.get("/admin/users", async (req, reply) => {
-    const s = admin(req, reply);
-    if (!s) return reply;
-    const rows = (await d.db.query(
-      `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.created_at, count(sd.id)::int AS stations
-         FROM users u LEFT JOIN subdomains sd ON sd.user_id = u.id
-        WHERE $1 = '' OR lower(u.email) LIKE '%' || $1 || '%' GROUP BY u.id ORDER BY u.created_at DESC LIMIT 200`, [q(req)])).rows;
-    return h.render(req, reply, "People", html`${tabs(req)}<div class="card"><h1>People</h1>
-      <form method="get"><input type="search" name="q" value="${q(req)}" placeholder="Search by email"> <button>Search</button></form>
-      <table><tr><th>Email</th><th>Role</th><th>Status</th><th>Stations</th><th>Joined</th><th></th></tr>${rows.map((u) => html`<tr>
-        <td>${u.email}${u.email_verified_at ? "" : html` <span class="chip">unconfirmed</span>`}</td><td>${u.role}</td>
-        <td>${u.status === "active" ? html`<span class="chip ok">active</span>` : html`<span class="chip bad">suspended</span>`}</td>
-        <td><a href="/admin/stations?q=${u.email}">${u.stations}</a></td><td>${when(u.created_at)}</td>
-        <td>${u.id === s.user.id ? "" : html`<form class="inline" method="post" action="/admin/users/${u.id}/${u.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${u.status === "active" ? "Suspend" : "Restore"} ${u.email} and all their stations?">${csrfField(s.csrf)}<button class="${u.status === "active" ? "danger" : ""}">${u.status === "active" ? "Suspend" : "Restore"}</button></form>`}</td>
-      </tr>`)}</table></div>`, h.takeFlash(req, reply));
-  });
-  for (const [path, on] of [["suspend", true], ["unsuspend", false]] as const) {
-    app.post(`/admin/users/:id/${path}`, async (req, reply) => {
-      const s = admin(req, reply);
-      if (!s) return reply;
-      const id = Number((req.params as { id: string }).id);
-      if (id === s.user.id) return h.back(reply, "/admin/users", { kind: "bad", text: "You cannot suspend yourself." });
-      await subs.setUserSuspended(h.ctx(), h.actor(s, req), id, on);
-      return h.back(reply, "/admin/users", { kind: "ok", text: on ? "Suspended, with their stations' DNS removed." : "Restored." });
-    });
-  }
-
   // ------------------------------------------------------------------ stations
 
   app.get("/admin/stations", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "stations.view");
     if (!s) return reply;
     const rows = (await d.db.query(
       `SELECT sd.id, sd.label, sd.status, u.email, st.last_ip, st.last_port, st.last_seen_at, st.app_version
          FROM subdomains sd JOIN users u ON u.id = sd.user_id JOIN studios st ON st.subdomain_id = sd.id
         WHERE $1 = '' OR sd.label LIKE '%' || $1 || '%' OR lower(u.email) LIKE '%' || $1 || '%'
         ORDER BY sd.label LIMIT 200`, [q(req)])).rows;
-    return h.render(req, reply, "Stations", html`${tabs(req)}<div class="card"><h1>Stations</h1>
+    return h.render(req, reply, "Stations", html`${tabs(req)}
+      ${can(s.user, "stations.manage") ? html`<div class="card"><h2>Create a station for someone</h2>
+        <form method="post" action="/admin/stations">${csrfField(s.csrf)}<div class="row">
+          <input name="email" type="email" placeholder="owner's email" required autocomplete="off" style="max-width:260px">
+          <input name="label" placeholder="name, e.g. kfm" required maxlength="63" autocomplete="off" style="max-width:200px">
+          <button class="primary">Create</button></div>
+          <p class="dim">The owner's plan limit applies. Their access code is shown once, on the next page.</p></form></div>` : ""}
+      <div class="card"><h1>Stations</h1>
       <form method="get"><input type="search" name="q" value="${q(req)}" placeholder="Search by name or owner"> <button>Search</button></form>
       <table><tr><th>Address</th><th>Owner</th><th>Status</th><th>Last address</th><th>Last seen</th><th>Nova</th><th></th></tr>${rows.map((r) => html`<tr>
         <td><a href="/stations/${r.id}">${fqdnOf(r.label, d.config.rootDomain)}</a></td><td>${r.email}</td><td>${statusChip(r.status, r.last_seen_at)}</td>
         <td>${r.last_ip ?? "—"}${r.last_port ? `:${r.last_port}` : ""}</td><td>${when(r.last_seen_at)}</td><td>${r.app_version ?? "—"}</td>
-        <td><form class="inline" method="post" action="/admin/stations/${r.id}/${r.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${r.status === "active" ? "Suspend" : "Restore"} ${r.label}?">${csrfField(s.csrf)}<button class="${r.status === "active" ? "danger" : ""}">${r.status === "active" ? "Suspend" : "Restore"}</button></form></td>
+        <td>${can(s.user, "stations.manage") ? html`<form class="inline" method="post" action="/admin/stations/${r.id}/${r.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${r.status === "active" ? "Suspend" : "Restore"} ${r.label}?">${csrfField(s.csrf)}<button class="${r.status === "active" ? "danger" : ""}">${r.status === "active" ? "Suspend" : "Restore"}</button></form>` : ""}</td>
       </tr>`)}</table></div>`, h.takeFlash(req, reply));
   });
   for (const [path, on] of [["suspend", true], ["unsuspend", false]] as const) {
     app.post(`/admin/stations/:id/${path}`, async (req, reply) => {
-      const s = admin(req, reply);
+      const s = admin(req, reply, "stations.manage");
       if (!s) return reply;
-      await subs.setSuspended(h.ctx(), h.actor(s, req), Number((req.params as { id: string }).id), on);
-      return h.back(reply, "/admin/stations", { kind: "ok", text: on ? "Suspended: its DNS record is gone and the API answers 403." : "Restored." });
+      const to = /^\/stations\/\d+$/.test(h.form(req).back ?? "") ? h.form(req).back : "/admin/stations";
+      try {
+        await subs.setSuspended(h.ctx(), h.actor(s, req), Number((req.params as { id: string }).id), on);
+      } catch (e) {
+        if (e instanceof subs.SubdomainError) return h.back(reply, to, { kind: "bad", text: e.message });
+        throw e;
+      }
+      return h.back(reply, to, { kind: "ok", text: on ? "Suspended: its DNS record is gone and the API answers 403." : "Restored." });
     });
   }
+  app.post("/admin/stations", async (req, reply) => {
+    const s = admin(req, reply, "stations.manage");
+    if (!s) return reply;
+    const f = h.form(req);
+    const owner = (await d.db.query<{ id: number }>("SELECT id FROM users WHERE lower(email) = lower($1)", [String(f.email ?? "").trim()])).rows[0];
+    if (!owner) return h.back(reply, "/admin/stations", { kind: "bad", text: `There is no account for ${String(f.email ?? "").trim() || "that email"}. Add the person first (People).` });
+    const label = normaliseLabel(f.label, d.config.rootDomain);
+    try {
+      const { accessCode } = await subs.claim(h.ctx(), h.actor(s, req), label, owner.id);
+      return h.codeOnce(req, reply, label, accessCode, `${fqdnOf(label, d.config.rootDomain)} is created`);
+    } catch (e) {
+      if (e instanceof subs.SubdomainError) return h.back(reply, f.back === "user" ? `/admin/users/${owner.id}` : "/admin/stations", { kind: "bad", text: e.message });
+      throw e;
+    }
+  });
 
   // ------------------------------------------------------------------ names
 
   app.get("/admin/names", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "names.manage");
     if (!s) return reply;
     const names = (await d.db.query("SELECT label, kind, reason, created_at FROM reserved_names ORDER BY kind, label")).rows;
     const cooling = (await d.db.query("SELECT label, available_after FROM name_cooldowns WHERE available_after > now() ORDER BY available_after")).rows;
@@ -197,7 +216,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     h.takeFlash(req, reply));
   });
   app.post("/admin/names", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "names.manage");
     if (!s) return reply;
     const f = h.form(req);
     const label = String(f.label ?? "").trim().toLowerCase();
@@ -209,7 +228,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return h.back(reply, "/admin/names", { kind: "ok", text: `${label} is ${kind}. Existing stations keep their names.` });
   });
   app.post("/admin/names/remove", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "names.manage");
     if (!s) return reply;
     const label = String(h.form(req).label ?? "");
     await d.db.query("DELETE FROM reserved_names WHERE label = $1", [label]);
@@ -217,7 +236,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return h.back(reply, "/admin/names", { kind: "ok", text: formError(label) ? `${label} removed.` : `${label} can be claimed.` });
   });
   app.post("/admin/names/release", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "names.manage");
     if (!s) return reply;
     const label = String(h.form(req).label ?? "");
     await subs.forceRelease(d.db, h.actor(s, req), label);
@@ -227,7 +246,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   // ------------------------------------------------------------------ certificates
 
   app.get("/admin/certificates", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "logs.view");
     if (!s) return reply;
     const week = Number((await d.db.query("SELECT count(*) AS n FROM certificates WHERE issued_at > now() - interval '7 days' AND renews_id IS NULL")).rows[0].n);
     const renewals = Number((await d.db.query("SELECT count(*) AS n FROM certificates WHERE issued_at > now() - interval '7 days' AND renews_id IS NOT NULL")).rows[0].n);
@@ -247,7 +266,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   // ------------------------------------------------------------------ TURN usage
 
   app.get("/admin/turn", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "logs.view");
     if (!s) return reply;
     const rows = (await d.db.query(
       `SELECT sd.label, sum(t.bytes_relayed)::bigint AS b, sum(t.sessions)::int AS n
@@ -261,7 +280,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   // ------------------------------------------------------------------ logs
 
   app.get("/admin/audit", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "logs.view");
     if (!s) return reply;
     const rows = (await d.db.query(
       `SELECT a.created_at, a.action, a.target, a.ip, a.metadata, u.email FROM audit_log a LEFT JOIN users u ON u.id = a.actor_user_id
@@ -275,7 +294,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   });
 
   app.get("/admin/operations", async (req, reply) => {
-    const s = admin(req, reply);
+    const s = admin(req, reply, "logs.view");
     if (!s) return reply;
     const rows = (await d.db.query("SELECT created_at, kind, level, target, message FROM ops_events ORDER BY created_at DESC LIMIT 300")).rows;
     return h.render(req, reply, "DNS / ACME", html`${tabs(req)}<div class="card"><h1>DNS, certificate and probe events</h1>

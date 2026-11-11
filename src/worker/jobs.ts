@@ -68,7 +68,7 @@ export async function dailyAlert(d: JobDeps): Promise<number> {
     "SELECT id, kind, target, message, created_at FROM ops_events WHERE level = 'error' AND alerted_at IS NULL AND kind IN ('dns', 'acme') ORDER BY created_at");
   if (!events.rowCount) return 0;
   const admins = new Set([...d.config.adminEmails,
-    ...(await d.db.query<{ email: string }>("SELECT email FROM users WHERE role = 'admin' AND status = 'active'")).rows.map((r) => r.email.toLowerCase())]);
+    ...(await d.db.query<{ email: string }>("SELECT email FROM users WHERE role IN ('admin', 'superadmin') AND status = 'active'")).rows.map((r) => r.email.toLowerCase())]);
   const text = [`${events.rowCount} DNS/certificate problem(s) since the last report:`, "",
     ...events.rows.map((e) => `${e.created_at.toISOString()}  ${e.kind.toUpperCase()}  ${e.target ?? "-"}  ${e.message}`),
     "", `Details: ${d.config.dashboardUrl}/admin/operations`].join("\n");

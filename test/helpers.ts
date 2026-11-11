@@ -8,6 +8,7 @@ import type { Config } from "../src/config.js";
 import { DnsManager } from "../src/dns/dns.js";
 import { MemoryProvider } from "../src/dns/providers.js";
 import { Metrics, type Deps } from "../src/api/studio.js";
+import { ALL_PERMISSIONS } from "../src/lib/rbac.js";
 
 export async function freshDb(): Promise<Db> {
   const base = inject("dbUrl");
@@ -41,9 +42,9 @@ export function platform(db: Db, over: Partial<Config> = {}) {
   return { config, provider, dns, deps };
 }
 
-/** A verified person, straight into the database. */
-export async function person(db: Db, email = `p${randomBytes(3).toString("hex")}@example.test`, role = "user"): Promise<number> {
+/** A verified person, straight into the database. An admin gets every permission unless told otherwise. */
+export async function person(db: Db, email = `p${randomBytes(3).toString("hex")}@example.test`, role = "user", permissions: string[] = role === "admin" ? ALL_PERMISSIONS : []): Promise<number> {
   const r = await db.query<{ id: number }>(
-    "INSERT INTO users (email, password_hash, role, email_verified_at) VALUES ($1, 'x', $2, now()) RETURNING id", [email, role]);
+    "INSERT INTO users (email, password_hash, role, permissions, email_verified_at) VALUES ($1, 'x', $2, $3, now()) RETURNING id", [email, role, permissions]);
   return r.rows[0].id;
 }

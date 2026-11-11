@@ -58,8 +58,9 @@ export function loadConfig(): Config {
     databaseUrl: env("DATABASE_URL"),
     dnsProvider,
     challTestSrvUrl: env("CHALLTESTSRV_URL", "http://127.0.0.1:8055"),
-    cloudflareApiToken: dnsProvider === "cloudflare" ? env("CLOUDFLARE_API_TOKEN") : env("CLOUDFLARE_API_TOKEN", ""),
-    cloudflareZoneId: dnsProvider === "cloudflare" ? env("CLOUDFLARE_ZONE_ID") : env("CLOUDFLARE_ZONE_ID", ""),
+    // Either here or in Admin > Settings: without both, DNS changes fail with a plain reason.
+    cloudflareApiToken: env("CLOUDFLARE_API_TOKEN", ""),
+    cloudflareZoneId: env("CLOUDFLARE_ZONE_ID", ""),
     acmeDirectoryUrl: env("ACME_DIRECTORY_URL", "https://acme-staging-v02.api.letsencrypt.org/directory"),
     acmeEmail: env("ACME_EMAIL"),
     acmeCaBundle: env("ACME_CA_BUNDLE", ""),

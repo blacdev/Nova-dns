@@ -6,6 +6,7 @@
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Db } from "../db/db.js";
+import type { Role } from "../lib/rbac.js";
 import { newToken, sameString, tokenHash } from "../lib/secrets.js";
 
 export const COOKIE = "nova_sid";
@@ -15,7 +16,9 @@ export const IDLE_HOURS = 12;
 export interface SessionUser {
   id: number;
   email: string;
-  role: "user" | "admin";
+  role: Role;
+  /** What this admin may do (see rbac.ts); empty for everyone else. */
+  permissions: string[];
   verified: boolean;
   totp: boolean;
 }
@@ -33,13 +36,13 @@ export async function loadSession(db: Db, token: string | undefined): Promise<Se
   const r = await db.query(
     `UPDATE sessions s SET expires_at = now() + make_interval(hours => $2)
        FROM users u WHERE s.token_hash = $1 AND u.id = s.user_id AND s.expires_at > now() AND u.status = 'active'
-     RETURNING s.token_hash, s.csrf, s.needs_totp, s.pending_totp_enc, u.id, u.email, u.role, u.email_verified_at, u.totp_secret_enc`,
+     RETURNING s.token_hash, s.csrf, s.needs_totp, s.pending_totp_enc, u.id, u.email, u.role, u.permissions, u.email_verified_at, u.totp_secret_enc`,
     [tokenHash(token), IDLE_HOURS]);
   const row = r.rows[0];
   if (!row) return null;
   return {
     tokenHash: row.token_hash, csrf: row.csrf, needsTotp: row.needs_totp, pendingTotpEnc: row.pending_totp_enc,
-    user: { id: row.id, email: row.email, role: row.role, verified: !!row.email_verified_at, totp: !!row.totp_secret_enc },
+    user: { id: row.id, email: row.email, role: row.role, permissions: row.permissions ?? [], verified: !!row.email_verified_at, totp: !!row.totp_secret_enc },
   };
 }
 

@@ -10,6 +10,7 @@ import { transaction } from "../db/db.js";
 import type { DnsManager } from "../dns/dns.js";
 import { audit } from "./audit.js";
 import { checkName, coolDown, fqdnOf } from "./names.js";
+import { allowance, stationWord } from "./plans.js";
 import { canonicalCode, hashSecret, newAccessCode } from "./secrets.js";
 
 export class SubdomainError extends Error {}
@@ -18,34 +19,53 @@ export interface Ctx {
   db: Db;
   dns: DnsManager;
   rootDomain: string;
+  /** SUBDOMAIN_LIMIT: the limit when no plan applies (see plans.ts). */
   limit: number;
 }
 
 export interface Actor {
   id: number;
   ip: string | null;
+  /** May manage any station (the `stations.manage` permission). */
   admin?: boolean;
+}
+
+function staffOnly(actor: Actor) {
+  if (!actor.admin) throw new SubdomainError("Not allowed.");
 }
 
 const isUnique = (e: unknown) => (e as { code?: string })?.code === "23505";
 
-/** Claim a name: the subdomain, its studio and its access code (returned once, never kept). */
-export async function claim(c: Ctx, actor: Actor, label: string): Promise<{ id: number; accessCode: string }> {
+/**
+ * Claim a name: the subdomain, its studio and its access code (returned once, never kept).
+ * With `ownerId`, an admin claims it for that person (their email need not be confirmed;
+ * their plan's limit still applies).
+ */
+export async function claim(c: Ctx, actor: Actor, label: string, ownerId = actor.id): Promise<{ id: number; accessCode: string }> {
+  const forOther = ownerId !== actor.id;
+  if (forOther) staffOnly(actor);
   const code = newAccessCode();
   const hash = await hashSecret(canonicalCode(code));
   try {
     const id = await transaction(c.db, async (tx) => {
       // One claim at a time per person, so the plan limit cannot be raced either.
-      const me = await tx.query<{ status: string; email_verified_at: Date | null }>("SELECT status, email_verified_at FROM users WHERE id = $1 FOR UPDATE", [actor.id]);
-      if (!me.rows[0] || me.rows[0].status !== "active") throw new SubdomainError("Your account is suspended.");
-      if (!me.rows[0].email_verified_at) throw new SubdomainError("Verify your email address first.");
-      const n = Number((await tx.query("SELECT count(*) AS n FROM subdomains WHERE user_id = $1", [actor.id])).rows[0].n);
-      if (n >= c.limit) throw new SubdomainError(`Your plan allows ${c.limit} subdomain${c.limit === 1 ? "" : "s"}.`);
+      const me = await tx.query<{ status: string; email: string; email_verified_at: Date | null }>("SELECT status, email, email_verified_at FROM users WHERE id = $1 FOR UPDATE", [ownerId]);
+      const owner = me.rows[0];
+      if (!owner) throw new SubdomainError("No such person.");
+      if (owner.status !== "active") throw new SubdomainError(forOther ? `${owner.email} is suspended.` : "Your account is suspended.");
+      if (!forOther && !owner.email_verified_at) throw new SubdomainError("Verify your email address first.");
+      const n = Number((await tx.query("SELECT count(*) AS n FROM subdomains WHERE user_id = $1", [ownerId])).rows[0].n);
+      const a = await allowance(tx, ownerId, c.limit);
+      if (n >= a.limit) {
+        throw new SubdomainError(forOther
+          ? `${owner.email} may have ${stationWord(a.limit)} and has ${n}. Raise their limit or change their plan first.`
+          : `Your plan allows ${stationWord(a.limit)}.`);
+      }
       const check = await checkName(tx, label);
       if (check.state !== "available") throw new SubdomainError(check.message);
-      const sub = await tx.query<{ id: number }>("INSERT INTO subdomains (label, user_id) VALUES ($1, $2) RETURNING id", [label, actor.id]);
+      const sub = await tx.query<{ id: number }>("INSERT INTO subdomains (label, user_id) VALUES ($1, $2) RETURNING id", [label, ownerId]);
       await tx.query("INSERT INTO studios (subdomain_id, access_code_hash) VALUES ($1, $2)", [sub.rows[0].id, hash]);
-      await audit(tx, { actor: actor.id, action: "subdomain.create", target: label, ip: actor.ip });
+      await audit(tx, { actor: actor.id, action: "subdomain.create", target: label, ip: actor.ip, metadata: forOther ? { owner: owner.email, admin: true } : {} });
       return sub.rows[0].id;
     });
     return { id, accessCode: code };
@@ -136,6 +156,7 @@ export async function remove(c: Ctx, actor: Actor, id: number): Promise<string> 
 
 /** Suspend or restore a subdomain: its DNS record goes (or comes back), the API answers 403 meanwhile. */
 export async function setSuspended(c: Ctx, actor: Actor, id: number, suspended: boolean): Promise<void> {
+  staffOnly(actor);
   const s = await transaction(c.db, async (tx) => {
     const s = await load(tx, id, true);
     await tx.query("UPDATE subdomains SET status = $2, updated_at = now() WHERE id = $1", [id, suspended ? "suspended" : "active"]);
@@ -162,6 +183,45 @@ export async function setUserSuspended(c: Ctx, actor: Actor, userId: number, sus
     if (suspended) await c.dns.removeName(fqdn).catch(() => undefined);
     else if (s.status === "active" && s.last_ip) await c.dns.pointAt(fqdn, s.last_ip).catch(() => undefined);
   }
+}
+
+/**
+ * Admin: give a station to someone else. Its access code is replaced (the old owner knows
+ * it) and every studio sign-in ends; the new code is returned, once, for the new owner.
+ * The new owner's limit applies.
+ */
+export async function transfer(c: Ctx, actor: Actor, id: number, toEmail: string): Promise<{ label: string; to: string; accessCode: string }> {
+  staffOnly(actor);
+  const code = newAccessCode();
+  const hash = await hashSecret(canonicalCode(code));
+  return transaction(c.db, async (tx) => {
+    const s = await load(tx, id, true);
+    const to = (await tx.query<{ id: number; email: string; status: string }>("SELECT id, email, status FROM users WHERE lower(email) = lower($1) FOR UPDATE", [toEmail.trim()])).rows[0];
+    if (!to) throw new SubdomainError(`There is no account for ${toEmail.trim() || "that email"}.`);
+    if (to.id === s.user_id) throw new SubdomainError(`${to.email} has it already.`);
+    if (to.status !== "active") throw new SubdomainError(`${to.email} is suspended.`);
+    const n = Number((await tx.query("SELECT count(*) AS n FROM subdomains WHERE user_id = $1", [to.id])).rows[0].n);
+    const a = await allowance(tx, to.id, c.limit);
+    if (n >= a.limit) throw new SubdomainError(`${to.email} may have ${stationWord(a.limit)} and has ${n}. Raise their limit or change their plan first.`);
+    const from = (await tx.query<{ email: string }>("SELECT email FROM users WHERE id = $1", [s.user_id])).rows[0]?.email;
+    await tx.query("UPDATE subdomains SET user_id = $2, updated_at = now() WHERE id = $1", [id, to.id]);
+    await tx.query("UPDATE studios SET access_code_hash = $2 WHERE id = $1", [s.studio_id, hash]);
+    await tx.query("UPDATE studio_tokens SET revoked_at = now() WHERE studio_id = $1 AND revoked_at IS NULL", [s.studio_id]);
+    await audit(tx, { actor: actor.id, action: "subdomain.transfer", target: s.label, ip: actor.ip, metadata: { from, to: to.email } });
+    return { label: s.label, to: to.email, accessCode: code };
+  });
+}
+
+/** Delete a person: each of their stations is deleted as an owner's delete would (DNS, certificates, cooldown), then the account. */
+export async function removeUser(c: Ctx, actor: Actor, userId: number): Promise<string> {
+  const ids = (await c.db.query<{ id: number }>("SELECT id FROM subdomains WHERE user_id = $1", [userId])).rows.map((r) => r.id);
+  for (const id of ids) await remove(c, { ...actor, admin: true }, id);
+  return transaction(c.db, async (tx) => {
+    const u = await tx.query<{ email: string }>("DELETE FROM users WHERE id = $1 RETURNING email", [userId]);
+    if (!u.rows[0]) throw new SubdomainError("No such person.");
+    await audit(tx, { actor: actor.id, action: "user.delete", target: u.rows[0].email, ip: actor.ip, metadata: { stations: ids.length } });
+    return u.rows[0].email;
+  });
 }
 
 /** Admin: free a name now (a cooldown or a reservation ends). */

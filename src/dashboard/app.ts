@@ -11,13 +11,19 @@ import QRCode from "qrcode";
 import type { Config } from "../config.js";
 import type { Db } from "../db/db.js";
 import type { DnsManager } from "../dns/dns.js";
+import { transaction } from "../db/db.js";
 import { audit } from "../lib/audit.js";
 import { forget, hit, LIMITS } from "../lib/limits.js";
 import type { Mailer } from "../lib/mail.js";
 import { checkName, fqdnOf, normaliseLabel } from "../lib/names.js";
+import { allowance, stationWord } from "../lib/plans.js";
+import { ALL_PERMISSIONS, can } from "../lib/rbac.js";
 import { decrypt, dummyHash, encrypt, hashSecret, newToken, newTotpSecret, tokenHash, totpUri, verifySecret, verifyTotp } from "../lib/secrets.js";
+import { LiveConfig } from "../lib/settings.js";
 import * as subs from "../lib/subdomains.js";
 import { adminRoutes } from "./admin.js";
+import { peopleRoutes } from "./admin-people.js";
+import { settingsRoutes } from "./admin-settings.js";
 import { APP_JS, bytes, csrfField, html, page, raw, when, type Html } from "./html.js";
 import { COOKIE, csrfOk, endSession, loadSession, preToken, startSession, type Session } from "./session.js";
 
@@ -28,6 +34,8 @@ export interface DashDeps {
   mail: Mailer;
   /** The addresses a name has on the public internet (the setup page; tests replace it). */
   lookup?: (name: string) => Promise<string[]>;
+  /** The settings saved in Admin > Settings (main.ts shares one with the DNS manager and mailer). */
+  live?: LiveConfig;
 }
 
 type Form = Record<string, string>;
@@ -49,6 +57,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
   const secure = d.config.dashboardUrl.startsWith("https://");
   const host = new URL(d.config.dashboardUrl).host;
   const ctx = (): subs.Ctx => ({ db: d.db, dns: d.dns, rootDomain: d.config.rootDomain, limit: d.config.subdomainLimit });
+  const live = d.live ?? new LiveConfig(d.config, d.db, { dns: d.dns });
 
   app.decorateRequest("session", null);
   app.addHook("onRequest", async (req, reply) => {
@@ -98,20 +107,22 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return { kind: kind === "ok" ? "ok" : "bad", text: rest.join(":").slice(0, 300) };
   };
 
-  async function mailLink(userId: number, email: string, kind: "verify" | "reset") {
+  /** An email link: confirm the address, reset the password, or (an admin made the account) choose one. */
+  async function mailLink(userId: number, email: string, kind: "verify" | "reset" | "invite"): Promise<boolean> {
     const r = await hit(d.db, `mail:${email.toLowerCase()}`, LIMITS.mail);
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const token = newToken();
-    const hours = kind === "verify" ? 48 : 1;
-    await d.db.query("INSERT INTO email_tokens (token_hash, user_id, kind, expires_at) VALUES ($1, $2, $3, now() + make_interval(hours => $4))", [tokenHash(token), userId, kind, hours]);
+    const hours = kind === "reset" ? 1 : kind === "invite" ? 72 : 48;
+    await d.db.query("INSERT INTO email_tokens (token_hash, user_id, kind, expires_at) VALUES ($1, $2, $3, now() + make_interval(hours => $4))",
+      [tokenHash(token), userId, kind === "verify" ? "verify" : "reset", hours]);
     const link = `${d.config.dashboardUrl}/${kind === "verify" ? "verify" : "reset"}?token=${token}`;
-    await d.mail({
-      to: email,
-      subject: kind === "verify" ? `Confirm your email for ${d.config.rootDomain}` : `Reset your ${d.config.rootDomain} password`,
-      text: kind === "verify"
-        ? `Open this link to confirm your email address (it works for 48 hours):\n\n${link}\n`
-        : `Someone asked to reset your password. If it was you, open this link within an hour:\n\n${link}\n\nIf not, ignore this email.`,
-    }).catch(() => undefined);
+    const text = kind === "verify"
+      ? `Open this link to confirm your email address (it works for 48 hours):\n\n${link}\n`
+      : kind === "invite"
+        ? `An account was made for you on ${d.config.rootDomain}. Open this link within 3 days to choose your password:\n\n${link}\n`
+        : `Someone asked to reset your password. If it was you, open this link within an hour:\n\n${link}\n\nIf not, ignore this email.`;
+    const subject = kind === "verify" ? `Confirm your email for ${d.config.rootDomain}` : kind === "invite" ? `Your ${d.config.rootDomain} account` : `Reset your ${d.config.rootDomain} password`;
+    return d.mail({ to: email, subject, text }).then(() => true, () => false);
   }
 
   async function useToken(token: string, kind: "verify" | "reset"): Promise<number | null> {
@@ -142,11 +153,19 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     if (!(await hit(d.db, `signup:${req.ip}`, LIMITS.signup)).ok) return signupForm(req, reply, email, { kind: "bad", text: "Too many new accounts from here; try later." }, 429);
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return signupForm(req, reply, email, { kind: "bad", text: "That is not an email address." }, 400);
     if (String(f.password ?? "").length < MIN_PASSWORD) return signupForm(req, reply, email, { kind: "bad", text: `The password needs ${MIN_PASSWORD} characters or more.` }, 400);
-    const role = d.config.adminEmails.includes(email) ? "admin" : "user";
-    const r = await d.db.query<{ id: number }>("INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id",
-      [email, await hashSecret(String(f.password)), role]);
-    if (!r.rows[0]) return signupForm(req, reply, email, { kind: "bad", text: "There is already an account with that email. Sign in, or reset the password." }, 409);
-    const id = r.rows[0].id;
+    const hash = await hashSecret(String(f.password));
+    // The very first account is the super admin; ADMIN_EMAILS (optional) become admins with every permission.
+    const made = await transaction(d.db, async (tx) => {
+      await tx.query("SELECT pg_advisory_xact_lock(7466022)"); // two first sign-ups at once: one wins
+      const first = !(await tx.query("SELECT 1 FROM users LIMIT 1")).rowCount;
+      const role = first ? "superadmin" : d.config.adminEmails.includes(email) ? "admin" : "user";
+      const r = await tx.query<{ id: number }>("INSERT INTO users (email, password_hash, role, permissions) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING id",
+        [email, hash, role, role === "admin" ? ALL_PERMISSIONS : []]);
+      return r.rows[0] ? { id: r.rows[0].id, role } : null;
+    });
+    if (!made) return signupForm(req, reply, email, { kind: "bad", text: "There is already an account with that email. Sign in, or reset the password." }, 409);
+    const id = made.id;
+    if (made.role === "superadmin") await audit(d.db, { actor: id, action: "user.superadmin", target: email, ip: req.ip, metadata: { first: true } });
     await audit(d.db, { actor: id, action: "user.signup", target: email, ip: req.ip });
     await mailLink(id, email, "verify");
     await startSession(d.db, reply, id, false, req.ip, secure);
@@ -333,7 +352,8 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const rows = (await d.db.query(
       `SELECT s.id, s.label, s.status, st.last_seen_at, st.app_version FROM subdomains s JOIN studios st ON st.subdomain_id = s.id
         WHERE s.user_id = $1 ORDER BY s.label`, [s.user.id])).rows;
-    const room = rows.length < d.config.subdomainLimit;
+    const a = await allowance(d.db, s.user.id, d.config.subdomainLimit);
+    const room = rows.length < a.limit;
     return render(req, reply, "My stations", html`
       ${!s.user.verified ? html`<div class="card notice"><b>Confirm your email</b> to claim a station. We sent a link to ${s.user.email}. <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button>Send the link again</button></form></div>` : ""}
       <div class="card"><h1>My stations</h1>
@@ -341,7 +361,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
         <td><a href="/stations/${r.id}">${fqdnOf(r.label, d.config.rootDomain)}</a></td>
         <td>${statusChip(r.status, r.last_seen_at)}</td><td class="wide-only">${when(r.last_seen_at)}</td><td class="wide-only"><a href="/stations/${r.id}">Manage</a></td></tr>`)}</table>`
         : html`<div class="empty"><p>No station yet. Claim an address like <b>kfm.${d.config.rootDomain}</b>, then enter its access code in Nova.</p></div>`}
-      ${room && s.user.verified ? html`<p class="row"${rows.length ? "" : raw(' style="justify-content:center"')}><a class="btn primary" href="/stations/new">Claim a station address</a></p>` : room ? "" : html`<p class="dim row">Your plan allows ${d.config.subdomainLimit} station${d.config.subdomainLimit === 1 ? "" : "s"}.</p>`}
+      ${room && s.user.verified ? html`<p class="row"${rows.length ? "" : raw(' style="justify-content:center"')}><a class="btn primary" href="/stations/new">Claim a station address</a></p>` : room ? "" : html`<p class="dim row">${a.custom ? "Your account allows" : a.plan ? `Your ${a.plan} plan allows` : "Your plan allows"} ${stationWord(a.limit)}.</p>`}
       </div>`, takeFlash(req, reply));
   });
 
@@ -368,12 +388,14 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     }
   });
 
+  /** The station, if `s` owns it or may see (GET) or change (POST) every station. */
   async function ownStation(req: FastifyRequest, reply: FastifyReply, s: Session) {
     const id = Number((req.params as { id: string }).id);
-    const row = (await d.db.query(
-      `SELECT s.id, s.label, s.status, s.user_id, s.created_at, st.id AS studio_id, st.last_ip, st.last_port, st.last_seen_at, st.app_version
-         FROM subdomains s JOIN studios st ON st.subdomain_id = s.id WHERE s.id = $1`, [id])).rows[0];
-    if (!row || (row.user_id !== s.user.id && s.user.role !== "admin")) {
+    const row = Number.isSafeInteger(id) ? (await d.db.query(
+      `SELECT s.id, s.label, s.status, s.user_id, s.created_at, st.id AS studio_id, st.last_ip, st.last_port, st.last_seen_at, st.app_version, u.email AS owner
+         FROM subdomains s JOIN studios st ON st.subdomain_id = s.id JOIN users u ON u.id = s.user_id WHERE s.id = $1`, [id])).rows[0] : undefined;
+    const staff = can(s.user, req.method === "GET" ? "stations.view" : "stations.manage");
+    if (!row || (row.user_id !== s.user.id && !staff)) {
       void render(req, reply, "Not found", html`<div class="card"><h1>No such station</h1></div>`, null, 404);
       return null;
     }
@@ -388,7 +410,16 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const cert = (await d.db.query("SELECT status, expires_at, error FROM certificates WHERE subdomain_id = $1 AND status IN ('pending', 'issued', 'failed') ORDER BY created_at DESC LIMIT 1", [st.id])).rows[0];
     const usage = (await d.db.query("SELECT coalesce(sum(bytes_relayed), 0)::bigint AS b, coalesce(sum(sessions), 0)::int AS n FROM turn_usage WHERE studio_id = $1 AND day >= date_trunc('month', current_date)", [st.studio_id])).rows[0];
     const url = `https://${fqdnOf(st.label, d.config.rootDomain)}${st.last_port && st.last_port !== 443 ? `:${st.last_port}` : ""}`;
-    return render(req, reply, st.label, html`<p><a href="/">← My stations</a></p><div class="card"><h1>${fqdnOf(st.label, d.config.rootDomain)}</h1>
+    const mine = st.user_id === s.user.id;
+    const manage = can(s.user, "stations.manage");
+    const staffPanel = manage ? html`<div class="card"><h2>Admin</h2>
+      <p>Owner: ${can(s.user, "users.view") ? html`<a href="/admin/users/${st.user_id}">${st.owner}</a>` : st.owner}</p>
+      <div class="row"><form class="inline" method="post" action="/admin/stations/${st.id}/${st.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${st.status === "active" ? "Suspend" : "Restore"} ${st.label}?">${csrfField(s.csrf)}<input type="hidden" name="back" value="/stations/${st.id}"><button class="${st.status === "active" ? "danger" : ""}">${st.status === "active" ? "Suspend" : "Restore"}</button></form></div>
+      <form method="post" action="/stations/${st.id}/transfer" data-confirm="Give ${st.label} to someone else? Its access code is replaced and Nova is signed out.">${csrfField(s.csrf)}
+        <label for="to">Move to another person (their email)</label><input id="to" name="email" type="email" required autocomplete="off">
+        <p class="dim">A new access code is made for the new owner (shown once, here) and the old one stops working.</p>
+        <div class="row"><button>Move</button></div></form></div>` : "";
+    return render(req, reply, st.label, html`<p><a href="${mine || !can(s.user, "stations.view") ? "/" : "/admin/stations"}">← ${mine || !can(s.user, "stations.view") ? "My stations" : "Stations"}</a></p><div class="card"><h1>${fqdnOf(st.label, d.config.rootDomain)}</h1>
       <div class="grid">
         <span class="dim">Address for presenters</span><span><code>${url}</code> <button type="button" data-copy="${url}">Copy</button></span>
         <span class="dim">Status</span><span>${statusChip(st.status, st.last_seen_at)}</span>
@@ -398,7 +429,8 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
         <span class="dim">Certificate</span><span>${!cert ? "None yet (Nova asks for one when it starts its server)" : cert.status === "issued" ? html`<span class="ok">Issued</span>, until ${when(cert.expires_at)}` : cert.status === "pending" ? "Being issued…" : html`<span class="bad">Failed</span> <span class="dim">${cert.error ?? ""}</span>`}</span>
         <span class="dim">Audio relay this month</span><span>${bytes(Number(usage.b))} in ${usage.n} session${usage.n === 1 ? "" : "s"}</span>
       </div></div>
-      ${st.status === "suspended" ? html`<div class="card bad">This station is suspended by the platform. Contact support.</div>` : html`
+      ${staffPanel}
+      ${st.status === "suspended" && !manage ? html`<div class="card bad">This station is suspended by the platform. Contact support.</div>` : html`${st.status === "suspended" ? html`<div class="card bad">This station is suspended.</div>` : ""}
       <div class="cols"><div class="card"><h2>Rename</h2><p class="dim">The old name is held for 30 days and then released. Nova picks up the new name on its next check-in (within 5 minutes) and gets a new certificate.</p>
         <form method="post" action="/stations/${st.id}/rename" data-confirm="Rename ${st.label}? Presenters will need the new address.">${csrfField(s.csrf)}
           <label for="label">New name</label><input id="label" name="label" required autocomplete="off" maxlength="63"><div id="name-state" aria-live="polite"></div>
@@ -423,7 +455,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
         throw e;
       }
     });
-  const actor = (s: Session, req: FastifyRequest): subs.Actor => ({ id: s.user.id, ip: req.ip, admin: s.user.role === "admin" });
+  const actor = (s: Session, req: FastifyRequest): subs.Actor => ({ id: s.user.id, ip: req.ip, admin: can(s.user, "stations.manage") });
 
   action("rename", async (s, id, f, req, reply) => {
     const r = await subs.rename(ctx(), actor(s, req), id, normaliseLabel(f.label, d.config.rootDomain));
@@ -441,7 +473,15 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return back(reply, "/", { kind: "ok", text: `${fqdnOf(label, d.config.rootDomain)} is deleted.` });
   });
 
-  adminRoutes(app, d, { render, form, back, takeFlash, signedIn, actor, ctx });
+  action("transfer", async (s, id, f, req, reply) => {
+    const r = await subs.transfer(ctx(), actor(s, req), id, String(f.email ?? ""));
+    return codeOnce(req, reply, r.label, r.accessCode, `${fqdnOf(r.label, d.config.rootDomain)} now belongs to ${r.to}`);
+  });
+
+  const helpers: Helpers = { render, form, back, takeFlash, signedIn, actor, ctx, mailLink, codeOnce, live };
+  adminRoutes(app, d, helpers);
+  peopleRoutes(app, d, helpers);
+  settingsRoutes(app, d, helpers);
 
   app.setNotFoundHandler((req, reply) => render(req, reply, "Not found", html`<div class="card"><h1>Not found</h1><p><a href="/">Home</a></p></div>`, null, 404));
   app.setErrorHandler((err, req, reply) => {
@@ -465,4 +505,8 @@ export type Helpers = {
   signedIn: (req: FastifyRequest, reply: FastifyReply) => Session | null;
   actor: (s: Session, req: FastifyRequest) => subs.Actor;
   ctx: () => subs.Ctx;
+  mailLink: (userId: number, email: string, kind: "verify" | "reset" | "invite") => Promise<boolean>;
+  /** A page showing a station's access code, once. */
+  codeOnce: (req: FastifyRequest, reply: FastifyReply, label: string, code: string, title: string) => FastifyReply;
+  live: LiveConfig;
 };

@@ -64,8 +64,31 @@ docker compose up -d --build
 ```
 
 Caddy gets certificates for `api.` and `app.` by itself; point their DNS records (and the
-apex, if you use it) at this host first. The first person to sign up with an address in
-`ADMIN_EMAILS` is an admin.
+apex, if you use it) at this host first. The first account made in the dashboard is
+the super admin (see below).
+
+### Admins, plans and settings
+
+- **The first account made is the super admin.** It may do everything, and is the only
+  one who makes other accounts admins and chooses what each admin may do (Admin > People >
+  a person > Role and permissions): see people, manage people, see or manage every
+  station, names, plans, settings, logs. Only the super admin acts on another admin's
+  account, and it can hand its role to an admin. `ADMIN_EMAILS` (optional) still makes
+  admins with every permission at sign-up. On an existing platform, the first migration
+  after this change makes its first admin (or else its first account) the super admin.
+- **Plans** (Admin > Plans) set how many stations a person may have; one is the default.
+  On a person's page an admin picks their plan or sets their own limit, which wins.
+  Without plans, `SUBDOMAIN_LIMIT` applies.
+- **People and stations**: admins add people (they get an email to choose a password),
+  confirm emails, send reset links, turn off a lost second factor, suspend, delete; create
+  a station for someone and move a station to another owner (its access code is replaced).
+- **Settings** (Admin > Settings): the Cloudflare token and zone, the SMTP address and
+  sender, the Let's Encrypt email, staging or production, and the weekly certificate
+  limit, without editing `.env` or restarting. Saved values win over `.env`, are stored
+  encrypted (key from `SESSION_SECRET`), are never shown again, and reach every process
+  within seconds. Changing them needs the `settings.manage` permission, two-step sign-in,
+  and the admin's password. The database, `SESSION_SECRET`, the domain, ports, proxies and
+  TURN's secrets stay in `.env`.
 
 **TURN host** (its own machine: it is bandwidth-heavy and needs a public address):
 

@@ -25,3 +25,15 @@ export function makeMailer(smtpUrl: string, from: string): Mailer {
     await transport.sendMail({ from, to: m.to, subject: m.subject, text: m.text });
   };
 }
+
+/** A mailer whose transport can be replaced (the SMTP settings changed in the dashboard). */
+export type SwitchableMailer = Mailer & { set(next: Mailer): void };
+
+export function switchableMailer(initial: Mailer): SwitchableMailer {
+  let current = initial;
+  const m = ((x: Mail) => current(x)) as SwitchableMailer;
+  m.set = (next) => {
+    current = next;
+  };
+  return m;
+}
