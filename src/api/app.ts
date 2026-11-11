@@ -4,6 +4,8 @@
  */
 
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { BillingError, handleWebhook } from "../billing/billing.js";
+import { BadSignature } from "../billing/gateways.js";
 import { decrypt, sameString } from "../lib/secrets.js";
 import { ApiError, unauthorized } from "../lib/errors.js";
 import * as studio from "./studio.js";
@@ -63,6 +65,24 @@ export function buildApi(d: Deps): FastifyInstance {
     const row = (await d.db.query<{ key_enc: string; cert_pem: string | null; expires_at: Date | null }>("SELECT key_enc, cert_pem, expires_at FROM platform_certs WHERE name = 'turn'")).rows[0];
     if (!row?.cert_pem) return reply.status(404).send({ error: { code: "not_ready", message: "Not issued yet." } });
     return { cert_pem: row.cert_pem, key_pem: decrypt(d.config.sessionSecret, row.key_enc), expires_at: row.expires_at };
+  });
+
+  // Payment providers' webhooks. The body is kept exactly as sent: the signature covers those bytes.
+  void app.register(async (scope) => {
+    scope.removeAllContentTypeParsers();
+    scope.addContentTypeParser("*", { parseAs: "string", bodyLimit: 256 * 1024 }, (_req, body, done) => done(null, body));
+    scope.post("/v1/billing/webhook/:provider", async (req, reply) => {
+      const provider = (req.params as { provider: string }).provider;
+      try {
+        const r = await handleWebhook({ db: d.db, config: d.config, fetch: d.fetch }, provider, String(req.body ?? ""), req.headers);
+        return reply.status(200).send({ received: true, result: r });
+      } catch (e) {
+        if (e instanceof BadSignature) return reply.status(400).send({ error: { code: "bad_signature", message: "The signature does not match." } });
+        if (e instanceof BillingError) return reply.status(404).send({ error: { code: "not_configured", message: e.message } });
+        if (e instanceof SyntaxError) return reply.status(400).send({ error: { code: "invalid_request", message: "Not JSON." } });
+        throw e; // 500: the provider retries later
+      }
+    });
   });
 
   app.get("/healthz", async (_req, reply) => {

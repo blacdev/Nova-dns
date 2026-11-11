@@ -83,7 +83,7 @@ describe("an owner's way through", () => {
     expect(list.body).toContain("kfm.example.test");
     stationId = /href="\/stations\/(\d+)"/.exec(list.body)![1];
     const detail = await b.get(`/stations/${stationId}`);
-    expect(detail.body).toContain("offline");
+    expect(detail.body).toContain("Offline");
     expect(detail.body).not.toContain(code!);
     // Nowhere in the database either, only its hash.
     expect(JSON.stringify((await db.query("SELECT * FROM studios")).rows)).not.toContain(code!.replace(/-/g, ""));
@@ -163,7 +163,12 @@ describe("admin", () => {
 
     const boss = new Browser("198.51.100.6");
     await boss.post("/signup", { email: "boss@example.test", password: "correct horse battery" });
-    for (const page of ["/admin", "/admin/users", "/admin/stations", "/admin/names", "/admin/certificates", "/admin/turn", "/admin/audit", "/admin/operations"]) {
+    // Admins need two-step sign-in before the console opens.
+    expect((await boss.get("/admin")).body).toContain("Two-step sign-in required");
+    await boss.post("/account/totp/start", {}, { from: "/account" });
+    const secret = /Key: <code>([A-Z2-7]+)</.exec((await boss.get("/account")).body)![1];
+    await boss.post("/account/totp/confirm", { code: totpAt(secret) }, { from: "/account" });
+    for (const page of ["/admin", "/admin/users", "/admin/stations", "/admin/names", "/admin/plans", "/admin/billing", "/admin/certificates", "/admin/turn", "/admin/audit", "/admin/operations"]) {
       expect((await boss.get(page)).statusCode, page).toBe(200);
     }
     const list = await boss.get("/admin/stations?q=radio1");

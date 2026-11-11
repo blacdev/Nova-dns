@@ -15,6 +15,7 @@ export const PERMISSIONS = {
   "names.manage": "Reserve, block and release names",
   "plans.manage": "Create and change plans",
   "settings.manage": "Change the platform's settings and credentials",
+  "billing.manage": "Turn payments on or off, choose the payment provider, set its keys, see payments",
   "logs.view": "See certificates, the audio relay, the audit log and DNS/ACME problems",
 } as const;
 

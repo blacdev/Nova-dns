@@ -35,6 +35,8 @@ export interface Deps {
   dns: DnsManager;
   config: Config;
   metrics: Metrics;
+  /** Payment providers' APIs (tests replace the network). */
+  fetch?: typeof fetch;
 }
 
 export class Metrics {

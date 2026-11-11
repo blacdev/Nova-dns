@@ -17,6 +17,7 @@
  * | platform-cert| 6 h     | turn.<root>'s own certificate for coturn (30 days ahead)      |
  */
 
+import { recheckPending, remindExpiring } from "../billing/billing.js";
 import type { Db } from "../db/db.js";
 import { opsEvent } from "../lib/audit.js";
 import type { Mailer } from "../lib/mail.js";
@@ -98,6 +99,9 @@ export function jobsFor(d: JobDeps): Job[] {
     { name: "prune", everyMs: 86400_000, run: () => prune(d.db, d.retention) },
     { name: "alert", everyMs: 86400_000, run: () => dailyAlert(d) },
     { name: "platform-cert", everyMs: 6 * 3600_000, run: () => d.issuer.ensurePlatformCert("turn") },
+    // Appended, so earlier jobs keep their lock numbers.
+    { name: "payments", everyMs: 600_000, run: () => recheckPending({ db: d.db, config: d.config, mail: d.mail }) },
+    { name: "plan-reminders", everyMs: 6 * 3600_000, run: () => remindExpiring({ db: d.db, config: d.config, mail: d.mail }) },
   ];
 }
 

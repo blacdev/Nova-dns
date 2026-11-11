@@ -1,4 +1,4 @@
-/** Admin control: the super admin, permissions, plans, managing people and stations, settings. */
+/** Admin control: the super admin, permissions, sudo mode, plans, managing people and stations, settings. */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { LightMyRequestResponse } from "fastify";
@@ -28,9 +28,10 @@ afterAll(async () => {
 });
 
 /** A browser: keeps cookies, finds the form token, sends forms from this site. */
-class Browser {
+export class Browser {
   cookies = new Map<string, string>();
-  constructor(public ip: string) {}
+  totp = "";
+  constructor(public ip: string, public email = "") {}
   private keep(r: LightMyRequestResponse) {
     for (const c of r.cookies) {
       if (c.value === "" || (c.maxAge !== undefined && c.maxAge <= 0)) this.cookies.delete(c.name);
@@ -57,20 +58,34 @@ class Browser {
   }
   /** The flash message the next page shows. */
   async flash(url: string) {
-    return /class="flash \w+" role="status">([^<]*)</.exec((await this.get(url)).body)?.[1] ?? "";
+    const t = /class="flash \w+" role="status">[\s\S]*?<span>([^<]*)</.exec((await this.get(url)).body)?.[1] ?? "";
+    return t.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  }
+  /** Turn on two-step sign-in (admins need it). */
+  async enable2fa() {
+    await this.post("/account/totp/start", {}, "/account");
+    this.totp = /Key: <code>([A-Z2-7]+)</.exec((await this.get("/account")).body)![1];
+    await this.post("/account/totp/confirm", { code: totpAt(this.totp) }, "/account");
+  }
+  /** Sudo mode ends (as if 10 minutes passed). */
+  async sudoExpires() {
+    await db.query("UPDATE sessions s SET elevated_until = now() - interval '1 minute' FROM users u WHERE u.id = s.user_id AND u.email = $1", [this.email]);
+  }
+  async sudo(next = "/") {
+    return this.post("/sudo", { password: PW, code: totpAt(this.totp), next }, "/sudo");
   }
 }
 
 const idOf = async (email: string) => (await db.query<{ id: number }>("SELECT id FROM users WHERE email = $1", [email])).rows[0].id;
 const roleOf = async (email: string) => (await db.query<{ role: string; permissions: string[] }>("SELECT role, permissions FROM users WHERE email = $1", [email])).rows[0];
 const sign = async (email: string, ip: string) => {
-  const b = new Browser(ip);
+  const b = new Browser(ip, email);
   await b.post("/signup", { email, password: PW });
   await db.query("UPDATE users SET email_verified_at = now() WHERE email = $1", [email]);
   return b;
 };
 
-const chief = new Browser("203.0.113.1");
+const chief = new Browser("203.0.113.1", "chief@example.test");
 let owner: Browser;
 let helper: Browser;
 
@@ -81,42 +96,54 @@ describe("the super admin", () => {
     helper = await sign("helper@example.test", "203.0.113.3");
     expect((await roleOf("chief@example.test")).role).toBe("superadmin");
     expect((await roleOf("owner@example.test")).role).toBe("user");
-    expect((await chief.get("/admin")).body).toContain("You are the super admin");
     expect((await owner.get("/admin")).statusCode).toBe(404);
     // Exactly one, whatever happens.
     await expect(db.query("UPDATE users SET role = 'superadmin' WHERE email = 'owner@example.test'")).rejects.toThrow();
   });
 
-  it("gives an admin only the permissions ticked, after confirming the password", async () => {
-    const id = await idOf("helper@example.test");
-    await chief.post(`/admin/users/${id}/role`, { role: "admin", perm: ["stations.view", "users.view", "nonsense"], password: "wrong password" }, `/admin/users/${id}`);
-    expect((await roleOf("helper@example.test")).role).toBe("user");
-    await chief.post(`/admin/users/${id}/role`, { role: "admin", perm: ["stations.view", "users.view", "nonsense"], password: PW }, `/admin/users/${id}`);
-    expect(await roleOf("helper@example.test")).toEqual({ role: "admin", permissions: ["stations.view", "users.view"] });
+  it("needs two-step sign-in before the console opens", async () => {
+    expect((await chief.get("/admin")).body).toContain("Two-step sign-in required");
+    expect((await chief.get("/admin/users")).body).not.toContain("owner@example.test");
+    await chief.enable2fa();
+    expect((await chief.get("/admin")).body).toContain("You are the super admin");
+  });
 
-    const tabs = (await helper.get("/admin")).body;
-    expect(tabs).toContain('href="/admin/stations"');
-    expect(tabs).not.toContain('href="/admin/settings"');
+  it("gives an admin only the permissions ticked, in sudo mode", async () => {
+    const id = await idOf("helper@example.test");
+    // Sudo mode has run out: the change is refused and the super admin is asked to confirm.
+    await chief.sudoExpires();
+    const r = await chief.post(`/admin/users/${id}/role`, { role: "admin", perm: ["stations.view", "users.view", "nonsense"] }, `/admin/users/${id}`);
+    expect(r.headers.location).toMatch(/^\/sudo\?next=/);
+    expect((await roleOf("helper@example.test")).role).toBe("user");
+    // A wrong code does not confirm it.
+    await chief.post("/sudo", { password: PW, code: "000000", next: "/" }, "/sudo");
+    expect((await chief.post(`/admin/users/${id}/role`, { role: "admin", perm: ["users.view"] }, `/admin/users/${id}`)).headers.location).toMatch(/^\/sudo/);
+    await chief.sudo();
+    await chief.post(`/admin/users/${id}/role`, { role: "admin", perm: ["stations.view", "users.view", "nonsense"] }, `/admin/users/${id}`);
+    expect(await roleOf("helper@example.test")).toEqual({ role: "admin", permissions: ["stations.view", "users.view"] });
+    expect(mails.some((m) => m.to === "helper@example.test" && m.subject.includes("Your access changed"))).toBe(true);
+
+    await helper.enable2fa();
+    const nav = (await helper.get("/admin")).body;
+    expect(nav).toContain('href="/admin/stations"');
+    expect(nav).not.toContain('href="/admin/settings"');
     expect((await helper.get("/admin/stations")).statusCode).toBe(200);
-    for (const page of ["/admin/plans", "/admin/names", "/admin/settings", "/admin/setup", "/admin/audit"]) expect((await helper.get(page)).statusCode, page).toBe(403);
+    for (const page of ["/admin/plans", "/admin/names", "/admin/settings", "/admin/setup", "/admin/audit", "/admin/billing"]) expect((await helper.get(page)).statusCode, page).toBe(403);
   });
 
   it("is the only one who changes roles, and no admin acts on another admin", async () => {
     const chiefId = await idOf("chief@example.test");
     const ownerId = await idOf("owner@example.test");
     await db.query("UPDATE users SET permissions = $2 WHERE email = $1", ["helper@example.test", ["users.view", "users.manage", "stations.view"]]);
-    // An admin may not give anyone a role, nor themselves more.
-    await helper.post(`/admin/users/${ownerId}/role`, { role: "admin", perm: ["settings.manage"], password: PW }, `/admin/users/${ownerId}`);
+    await helper.post(`/admin/users/${ownerId}/role`, { role: "admin", perm: ["settings.manage"] }, `/admin/users/${ownerId}`);
     expect((await roleOf("owner@example.test")).role).toBe("user");
-    // Nor suspend or reset the super admin.
     await helper.post(`/admin/users/${chiefId}/suspend`, {}, `/admin/users/${chiefId}`);
     expect((await db.query("SELECT status FROM users WHERE id = $1", [chiefId])).rows[0].status).toBe("active");
     expect(await helper.flash(`/admin/users/${chiefId}`)).toContain("Only the super admin");
-    // But a station owner, yes.
     await helper.post(`/admin/users/${ownerId}/suspend`, {}, `/admin/users/${ownerId}`);
     expect((await db.query("SELECT status FROM users WHERE id = $1", [ownerId])).rows[0].status).toBe("suspended");
     await helper.post(`/admin/users/${ownerId}/unsuspend`, {}, `/admin/users/${ownerId}`);
-    owner = new Browser("203.0.113.2");
+    owner = new Browser("203.0.113.2", "owner@example.test");
     await owner.post("/login", { email: "owner@example.test", password: PW }, "/login");
   });
 });
@@ -128,10 +155,11 @@ describe("plans", () => {
     await owner.post("/stations", { label: "two" }, "/stations/new");
     expect(await owner.flash("/stations/new")).toContain("plan allows 1 station");
 
-    await chief.post("/admin/plans", { name: "Free", limit: "1", default: "1" }, "/admin/plans");
-    await chief.post("/admin/plans", { name: "Pro", limit: "3" }, "/admin/plans");
-    await chief.post("/admin/plans", { name: "pro", limit: "9" }, "/admin/plans");
-    expect(await chief.flash("/admin/plans")).toContain("already a plan called pro");
+    await chief.post("/admin/plans", { name: "Free", limit: "1", default: "1" }, "/admin/plans/new");
+    await chief.post("/admin/plans", { name: "Pro", limit: "3", price: "19.99", currency: "USD", period: "month" }, "/admin/plans/new");
+    await chief.post("/admin/plans", { name: "pro", limit: "9" }, "/admin/plans/new");
+    expect(await chief.flash("/admin/plans/new")).toContain("already a plan called pro");
+    expect((await db.query("SELECT price_minor, currency FROM plans WHERE name = 'Pro'")).rows[0]).toEqual({ price_minor: 1999, currency: "USD" });
     expect((await owner.get("/")).body).toContain("Your Free plan allows 1 station");
 
     const pro = (await db.query("SELECT id FROM plans WHERE name = 'Pro'")).rows[0].id;
@@ -149,9 +177,11 @@ describe("plans", () => {
     expect((await db.query("SELECT count(*)::int AS n FROM subdomains WHERE user_id = $1", [ownerId])).rows[0].n).toBe(4);
     expect((await owner.get("/")).body).toContain("Your account allows 4 stations");
 
-    // Only one default plan.
-    await chief.post("/admin/plans", { name: "Starter", limit: "2", default: "1" }, "/admin/plans");
+    // Only one default plan; a bad price is refused.
+    await chief.post("/admin/plans", { name: "Starter", limit: "2", default: "1" }, "/admin/plans/new");
     expect((await db.query("SELECT name FROM plans WHERE is_default")).rows.map((r) => r.name)).toEqual(["Starter"]);
+    await chief.post("/admin/plans", { name: "Odd", limit: "2", price: "12.345", currency: "USD" }, "/admin/plans/new");
+    expect(await chief.flash("/admin/plans/new")).toContain("like 19.99");
   });
 
   it("are changed by those allowed to only", async () => {
@@ -192,8 +222,13 @@ describe("people and stations", () => {
     expect((await helper.get(`/stations/${sd.id}`)).statusCode).toBe(200);
   });
 
-  it("deletes a person with their stations", async () => {
+  it("deletes a person with their stations, in sudo mode", async () => {
     const id = await idOf("owner@example.test");
+    await chief.sudoExpires();
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("Confirm it is you to continue");
+    await chief.post(`/admin/users/${id}/delete`, { confirm: "owner@example.test" }, `/admin/users/${id}`);
+    expect((await db.query("SELECT 1 FROM users WHERE id = $1", [id])).rowCount).toBe(1);
+    await chief.sudo();
     await chief.post(`/admin/users/${id}/delete`, { confirm: "nope" }, `/admin/users/${id}`);
     expect((await db.query("SELECT 1 FROM users WHERE id = $1", [id])).rowCount).toBe(1);
     await chief.post(`/admin/users/${id}/delete`, { confirm: "owner@example.test" }, `/admin/users/${id}`);
@@ -201,27 +236,54 @@ describe("people and stations", () => {
     expect((await db.query("SELECT 1 FROM subdomains WHERE label IN ('one', 'two', 'three', 'four')")).rowCount).toBe(0);
     expect((await db.query("SELECT 1 FROM name_cooldowns WHERE label = 'one'")).rowCount).toBe(1);
     const auditPage = (await chief.get("/admin/audit")).body;
-    for (const a of ["user.role", "plan.create", "user.plan", "subdomain.transfer", "user.delete"]) expect(auditPage).toContain(a);
+    for (const a of ["user.role", "user.sudo", "plan.create", "user.plan", "subdomain.transfer", "user.delete"]) expect(auditPage).toContain(a);
+  });
+});
+
+describe("account security", () => {
+  it("lists signed-in devices and ends them", async () => {
+    const other = new Browser("203.0.113.50", "new@example.test");
+    await other.post("/login", { email: "new@example.test", password: "a brand new password" }, "/login");
+    const me = new Browser("203.0.113.51", "new@example.test");
+    await me.post("/login", { email: "new@example.test", password: "a brand new password" }, "/login");
+    const page = (await me.get("/account")).body;
+    expect(page).toContain("This device");
+    expect(page).toContain("203.0.113.50");
+    await me.post("/account/sessions/others", {}, "/account");
+    expect((await other.get("/")).headers.location).toMatch(/^\/login/);
+    expect((await me.get("/")).statusCode).toBe(200);
+  });
+
+  it("refuses weak passwords and sends a notice when one changes", async () => {
+    const b = new Browser("203.0.113.52", "new@example.test");
+    await b.post("/login", { email: "new@example.test", password: "a brand new password" }, "/login");
+    await b.post("/account/password", { current: "a brand new password", password: "aaaaaaaaaaaa" }, "/account");
+    expect(await b.flash("/account")).toContain("not one repeated character");
+    await b.post("/account/password", { current: "a brand new password", password: "another long password" }, "/account");
+    expect(mails.some((m) => m.to === "new@example.test" && m.subject.includes("password was changed"))).toBe(true);
+  });
+
+  it("only goes back to addresses on this site after sign-in", async () => {
+    const b = new Browser("203.0.113.53");
+    const r = await b.post("/login", { email: "new@example.test", password: "another long password", next: "//evil.example/x" }, "/login");
+    expect(r.headers.location).toBe("/");
   });
 });
 
 describe("settings", () => {
-  it("need two-step sign-in on", async () => {
-    expect((await chief.get("/admin/settings")).body).toContain("Turn on two-step sign-in first");
-    expect((await chief.post("/admin/settings/mail", { mailFrom: "x@example.test", password: PW }, "/admin/users")).statusCode).toBe(403);
+  it("need sudo mode", async () => {
+    await chief.sudoExpires();
+    const r = await chief.get("/admin/settings");
+    expect(r.headers.location).toBe("/sudo?next=%2Fadmin%2Fsettings");
+    expect((await chief.post("/admin/settings/mail", { mailFrom: "x@example.test" }, "/admin/users")).headers.location).toMatch(/^\/sudo/);
+    expect(p.config.mailFrom).not.toBe("x@example.test");
   });
 
-  let secret = "";
   it("store credentials encrypted, take effect at once, and go back to .env", async () => {
-    await chief.post("/account/totp/start", {}, "/account");
-    secret = /Key: <code>([A-Z2-7]+)</.exec((await chief.get("/account")).body)![1];
-    await chief.post("/account/totp/confirm", { code: totpAt(secret) }, "/account");
-    expect((await chief.get("/admin/settings")).body).toContain("Cloudflare");
+    await chief.sudo("/admin/settings");
+    expect((await chief.get("/admin/settings")).body).toContain("Cloudflare credentials");
 
-    // A wrong password changes nothing.
-    await chief.post("/admin/settings/mail", { smtpUrl: "smtps://mailer:s3cret-pass@smtp.example.test:465", mailFrom: "Radio <hi@example.test>", password: "nope" }, "/admin/settings");
-    expect(p.config.smtpUrl).toBe("");
-    await chief.post("/admin/settings/mail", { smtpUrl: "smtps://mailer:s3cret-pass@smtp.example.test:465", mailFrom: "Radio <hi@example.test>", password: PW }, "/admin/settings");
+    await chief.post("/admin/settings/mail", { smtpUrl: "smtps://mailer:s3cret-pass@smtp.example.test:465", mailFrom: "Radio <hi@example.test>" }, "/admin/settings");
     expect(p.config.smtpUrl).toBe("smtps://mailer:s3cret-pass@smtp.example.test:465");
     expect(p.config.mailFrom).toBe("Radio <hi@example.test>");
     const raw = JSON.stringify((await db.query("SELECT * FROM settings")).rows) + JSON.stringify((await db.query("SELECT * FROM audit_log")).rows);
@@ -232,7 +294,7 @@ describe("settings", () => {
 
     // Cloudflare: the DNS provider changes without a restart.
     expect(p.dns.providerName).toBe("memory");
-    await chief.post("/admin/settings/dns", { dnsProvider: "cloudflare", cloudflareApiToken: "x".repeat(40), cloudflareZoneId: "a".repeat(32), password: PW }, "/admin/settings");
+    await chief.post("/admin/settings/dns", { dnsProvider: "cloudflare", cloudflareApiToken: "x".repeat(40), cloudflareZoneId: "a".repeat(32) }, "/admin/settings");
     expect(p.config.cloudflareZoneId).toBe("a".repeat(32));
     expect(p.dns.providerName).toBe("cloudflare");
     // Another process (a fresh LiveConfig over the same database) sees the same.
@@ -243,21 +305,19 @@ describe("settings", () => {
     await chief.post("/admin/settings/clear", { key: "dnsProvider" }, "/admin/settings");
     expect(p.dns.providerName).toBe("memory");
 
-    // Bad values are refused with a reason.
-    await chief.post("/admin/settings/acme", { acmeEmail: "not an email", password: PW }, "/admin/settings");
+    await chief.post("/admin/settings/acme", { acmeEmail: "not an email" }, "/admin/settings");
     expect(await chief.flash("/admin/settings")).toContain("not an email address");
   });
 
   it("are not for admins without the permission", async () => {
-    expect((await helper.post("/admin/settings/mail", { mailFrom: "x@example.test", password: PW }, "/admin/stations")).statusCode).toBe(403);
+    expect((await helper.post("/admin/settings/mail", { mailFrom: "x@example.test" }, "/admin/stations")).statusCode).toBe(403);
   });
 
   it("the super admin hands over the role", async () => {
     const id = await idOf("helper@example.test");
-    // Needs the code again: chief has two-step sign-in now, and this browser is still signed in.
-    await chief.post(`/admin/users/${id}/superadmin`, { password: PW }, `/admin/users/${id}`);
+    await chief.post(`/admin/users/${id}/superadmin`, {}, `/admin/users/${id}`);
     expect((await roleOf("helper@example.test")).role).toBe("superadmin");
     expect((await roleOf("chief@example.test")).role).toBe("admin");
-    expect((await roleOf("chief@example.test")).permissions).toContain("settings.manage");
+    expect((await roleOf("chief@example.test")).permissions).toContain("billing.manage");
   });
 });
