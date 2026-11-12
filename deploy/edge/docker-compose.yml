@@ -1,8 +1,9 @@
 # The tunnel's edge on its own host (Nova's docs/TUNNEL.md): stations that open no port
 # dial in here over QUIC; presenters' browsers connect here and are passed down to their
 # station, still encrypted. It needs a UDP port (stations) and TCP port(s) (presenters)
-# forwarded straight to it, never through a reverse proxy: EDGE_QUIC and EDGE_PUBLIC in .env
-# (./setup.sh edge writes them). Behind Nginx Proxy Manager, which keeps TCP 443: TCP 25433.
+# forwarded straight to it, never through a reverse proxy. Which ports is set on the platform
+# (EDGE_HOST's port, EDGE_PORTS; ./setup.sh platform): the edge asks for them as it starts and
+# follows a change by itself. Behind Nginx Proxy Manager, which keeps TCP 443: e.g. TCP 25433.
 #
 #   ./setup.sh edge              # from the repository's root: asks, tests, writes .env, starts
 #   (by hand: .env with EDGE_API_BASE and the API's EDGE_TOKEN, then docker compose up -d --build)

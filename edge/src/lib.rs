@@ -5,5 +5,6 @@
 pub mod api;
 pub mod edge;
 pub mod log;
+pub mod ports;
 pub mod proxy;
 pub mod sni;

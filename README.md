@@ -163,7 +163,12 @@ network, give the edge another.
    the name `edge`, and whether its address takes connections.
 
 The worker issues `edge.ROOT_DOMAIN`'s certificate; the edge fetches it and keeps it
-current. By hand instead: `EDGE_IP` and `EDGE_TOKEN` in the platform's `.env`, and in
+current. **Its ports are set in one place, the platform** (`EDGE_HOST`'s port for stations,
+`EDGE_PORTS` for presenters): the edge asks for them as it starts
+(`GET /internal/edge/config`) and starts again on new ones within 5 minutes of a change;
+stations learn them on every heartbeat (the address update's answer carries the offer), and
+the dashboard's "Address for presenters" names the port presenters use. Only the router's
+forwards must be changed by hand to match. By hand instead: `EDGE_IP` and `EDGE_TOKEN` in the platform's `.env`, and in
 `deploy/edge/.env` `EDGE_API_BASE` and the same `EDGE_TOKEN`, then
 `docker compose -f deploy/edge/docker-compose.yml up -d --build`. Every presenter's page and live-link message goes through it: put it near the
 stations. It limits connections per presenter address (96) and in total (8192), and
@@ -211,7 +216,7 @@ JSON over HTTPS. Errors are `{"error": {"code", "message"}}`. Authenticated call
 | `POST /v1/reachability/probe` `{port}` | `{reachable, latency_ms, error}`; 1 per 10 s; never into private networks |
 | `GET /v1/ice-servers` | STUN + TURN, coturn REST credentials valid 6 h |
 
-The edge's own calls, with `EDGE_TOKEN`: `POST /internal/edge/auth {token}` (is a station's
+The edge's own calls, with `EDGE_TOKEN`: `GET /internal/edge/config` (its ports: `{quic_port, ports, server_name}`), `POST /internal/edge/auth {token}` (is a station's
 token good: `{ok, fqdn}` or `{ok: false, code: invalid_token | suspended, message}`) and
 `GET /internal/edge-cert` (edge.ROOT_DOMAIN's certificate and key; 404 until issued).
 

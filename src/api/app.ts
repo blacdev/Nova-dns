@@ -70,6 +70,14 @@ export function buildApi(d: Deps): FastifyInstance {
   app.get("/internal/turn-cert", async (req, reply) => platformCert("turn", d.config.turnUsageToken, req, reply));
   app.get("/internal/edge-cert", async (req, reply) => platformCert("edge", d.config.edgeToken, req, reply));
 
+  // The tunnel's edge asks which ports to listen on: the platform is the one place they are
+  // set (EDGE_HOST's port, EDGE_PORTS), so the edge and what stations are told never differ.
+  app.get("/internal/edge/config", async (req) => {
+    const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
+    if (!d.config.edgeToken || !sameString(given, d.config.edgeToken)) throw unauthorized("Not allowed.", "forbidden");
+    return { quic_port: studio.edgeQuicPort(d), ports: d.config.edgePorts, server_name: `edge.${d.config.rootDomain}` };
+  });
+
   // The tunnel's edge checks a station's token (Nova's docs/TUNNEL.md).
   app.post("/internal/edge/auth", async (req) => {
     const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";

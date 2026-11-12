@@ -641,25 +641,9 @@ setup_edge() {
     note "EDGE_TOKEN comes from the platform's .env (./setup.sh platform printed it)."
     ask_secret EDGE_TOKEN "EDGE_TOKEN"
   fi
-  # Its ports, as the platform's run chose them (.env) or this machine's earlier run; else asked.
-  local udp tcp p
-  if grep -qs '^EDGE_QUIC=..*' deploy/edge/.env; then
-    udp=$(old EDGE_QUIC); udp=${udp##*:}
-    tcp=$(old EDGE_PUBLIC); tcp=$(printf '%s' "$tcp" | tr ',' '\n' | sed 's/.*://' | paste -sd, -)
-    note "Ports as saved in deploy/edge/.env: UDP $udp for stations, TCP $tcp for presenters."
-  elif grep -qs '^EDGE_PORTS=..*' .env; then
-    udp=$(old EDGE_HOST); udp=${udp##*:}; tcp=$(old EDGE_PORTS)
-    note "Ports as the platform has them (.env): UDP $udp for stations, TCP $tcp for presenters."
-  else
-    local proxied
-    note "TCP 443 is often taken by a reverse proxy (Nginx Proxy Manager, Caddy) on the router."
-    choose proxied "Does a proxy on this network already have TCP 443" yes yes no
-    ask_port udp "UDP port stations dial (as on the platform: EDGE_HOST's port)" 443
-    ask_ports tcp "TCP port(s) for presenters (as on the platform: EDGE_PORTS)" "$([ "$proxied" = yes ] && echo 25433 || echo 443,25433)"
-  fi
-  EDGE_QUIC="0.0.0.0:$udp"
-  EDGE_PUBLIC=""
-  for p in ${tcp//,/ }; do EDGE_PUBLIC="${EDGE_PUBLIC:+$EDGE_PUBLIC,}0.0.0.0:$p"; done
+  # Its ports are the platform's (EDGE_HOST's port, EDGE_PORTS): the edge asks for them as it
+  # starts, so they are never set here and can never differ from what stations are told.
+  local udp="" tcp=""
 
   bold "Testing it with the platform"
   if ! command -v curl >/dev/null 2>&1; then
@@ -683,6 +667,16 @@ setup_edge() {
       000|"") fail "Could not reach $EDGE_API_BASE from here. Check the address and that this machine can reach the internet." ;;
       *) fail "The platform's API answered $code. Check its logs: docker compose logs api" ;;
     esac
+    local config
+    config=$(curl -s -m 10 -H "Authorization: Bearer $EDGE_TOKEN" "$EDGE_API_BASE/internal/edge/config" 2>/dev/null || true)
+    # Spaces or none after ":" and ",": any JSON writer's way.
+    udp=$(printf '%s' "$config" | tr -d ' ' | grep -o '"quic_port":[0-9]*' | cut -d: -f2 || true)
+    tcp=$(printf '%s' "$config" | tr -d ' ' | grep -o '"ports":\[[0-9,]*\]' | grep -o '[0-9][0-9,]*' || true)
+    if [ -n "$udp" ] && [ -n "$tcp" ]; then
+      good "The platform says: UDP $udp for stations, TCP ${tcp//,/, } for presenters (change them there: ./setup.sh platform)."
+    else
+      fail "The platform's API does not tell the edge its ports yet: update the platform (git pull, ./setup.sh platform) and try again."
+    fi
     code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Authorization: Bearer $EDGE_TOKEN" "$EDGE_API_BASE/internal/edge-cert" 2>/dev/null || true)
     case "$code" in
       200) good "edge.$ROOT_DOMAIN's certificate is ready." ;;
@@ -702,11 +696,11 @@ setup_edge() {
     good "edge.$ROOT_DOMAIN -> $a"
   fi
 
+  # No EDGE_QUIC / EDGE_PUBLIC: an earlier run's are dropped, so the platform's ports rule.
   declare -gA ENV=(
     [ROOT_DOMAIN]=$ROOT_DOMAIN [EDGE_API_BASE]=$EDGE_API_BASE [EDGE_TOKEN]=$EDGE_TOKEN
-    [EDGE_QUIC]=$EDGE_QUIC [EDGE_PUBLIC]=$EDGE_PUBLIC
   )
-  ENV_ORDER=(ROOT_DOMAIN EDGE_API_BASE EDGE_TOKEN EDGE_QUIC EDGE_PUBLIC)
+  ENV_ORDER=(ROOT_DOMAIN EDGE_API_BASE EDGE_TOKEN)
   write_env deploy/edge/.env
 
   bold "Starting"
@@ -730,8 +724,14 @@ setup_edge() {
   bold "Next"
   note "Forward on the router STRAIGHT to this machine (not through a reverse proxy: behind one,"
   note "every presenter would look like the proxy), and open on this machine's firewall:"
-  note "  UDP $udp   stations dial in"
-  note "  TCP ${tcp//,/, }   presenters"
+  if [ -n "$udp" ]; then
+    note "  UDP $udp   stations dial in"
+    note "  TCP ${tcp//,/, }   presenters"
+  else
+    note "  the UDP and TCP ports the platform names (./setup.sh platform shows them)"
+  fi
+  note "If you change them on the platform, the edge follows by itself within 5 minutes;"
+  note "change the router's forwards to match."
   note "Stations need Nova 0.2.27 or later; they use the edge by themselves when they cannot"
   note "be reached directly (Settings > Remote access > How presenters reach this station)."
   note "Logs: docker compose -f deploy/edge/docker-compose.yml logs -f"
