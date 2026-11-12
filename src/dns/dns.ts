@@ -33,7 +33,10 @@ export interface DnsCheckStep {
 }
 
 export const STUDIO_TTL = 60;
-const PLATFORM_LABELS = new Set(["api", "app", "turn", "www", "_acme-challenge"]);
+/** The platform's own names that get a certificate: coturn's, and the tunnel's edge. */
+export type PlatformLabel = "turn" | "edge";
+
+const PLATFORM_LABELS = new Set(["api", "app", "turn", "edge", "www", "_acme-challenge"]);
 
 export class DnsManager {
   constructor(private db: Db, private provider: DnsProvider, private rootDomain: string, private sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))) {}
@@ -124,12 +127,12 @@ export class DnsManager {
   }
 
   /** The challenge for one of the platform's own names (turn.<root>): worker only, never a studio flow. */
-  async setPlatformChallenge(label: "turn", value: string): Promise<void> {
+  async setPlatformChallenge(label: PlatformLabel, value: string): Promise<void> {
     const name = `_acme-challenge.${label}.${this.rootDomain}`;
     await this.retry(`set TXT ${name}`, name, () => this.provider.upsertRecord(name, "TXT", value, STUDIO_TTL));
   }
 
-  async clearPlatformChallenge(label: "turn", value: string): Promise<void> {
+  async clearPlatformChallenge(label: PlatformLabel, value: string): Promise<void> {
     const name = `_acme-challenge.${label}.${this.rootDomain}`;
     await this.retry(`remove TXT ${name}`, name, () => this.provider.deleteRecord(name, "TXT", value)).catch(() => undefined);
   }

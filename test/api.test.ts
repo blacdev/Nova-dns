@@ -76,7 +76,7 @@ describe("3.2 DNS update", () => {
     const s = await registered("ddnsfm");
     const calls = p.provider.calls;
     const first = await post("/v1/ddns/update", { ip_override: null, port: 25433 }, s.studio_token, "198.51.100.7");
-    expect(first.json()).toEqual({ ip: "198.51.100.7", changed: true, dns_status: "propagated", fqdn: "ddnsfm.example.test" });
+    expect(first.json()).toEqual({ ip: "198.51.100.7", changed: true, dns_status: "propagated", fqdn: "ddnsfm.example.test", via: "direct" });
     expect(p.provider.get("ddnsfm.example.test", "A")).toEqual(["198.51.100.7"]);
     const again = await post("/v1/ddns/update", { port: 25433 }, s.studio_token, "198.51.100.7");
     expect(again.json().changed).toBe(false);
@@ -261,3 +261,84 @@ async function selfSignedCert(keyPem: string): Promise<string> {
   const cert = await X509CertificateGenerator.createSelfSigned({ serialNumber: "01", name: "CN=localhost", notBefore: new Date(Date.now() - 60_000), notAfter: new Date(Date.now() + 86400_000), keys, signingAlgorithm: alg });
   return PemConverter.encode(cert.rawData, "CERTIFICATE");
 }
+
+describe("the tunnel's edge (Nova's docs/TUNNEL.md)", () => {
+  // A second platform on the same database, running an edge.
+  let edged: ReturnType<typeof platform>;
+  let edgeApi: ReturnType<typeof buildApi>;
+  beforeAll(() => {
+    edged = platform(db, { edgeIp: "203.0.113.50", edgeHost: "edge.example.test:443" });
+    edgeApi = buildApi(edged.deps);
+  });
+  afterAll(async () => {
+    await edgeApi.close();
+  });
+  const on = (url: string, payload: unknown, token?: string, ip = "198.51.100.30") =>
+    edgeApi.inject({ method: "POST", url, payload: payload as object, remoteAddress: ip, headers: token ? { authorization: `Bearer ${token}` } : {} });
+
+  it("is offered at registration only while the platform runs one", async () => {
+    const plain = await registered("noedgefm");
+    expect(plain).not.toHaveProperty("tunnel");
+    const s = await station("edgefm");
+    const r = await on("/v1/studio/register", { hostname: "edgefm", access_code: s.accessCode, install_id: "i", app_version: "0.2.27" });
+    expect(r.json().tunnel).toEqual({ edge: "edge.example.test:443", server_name: "edge.example.test" });
+  });
+
+  it("via tunnel points the name at the edge and keeps the station's own address for the probe", async () => {
+    const s = await station("viafm");
+    const token = (await on("/v1/studio/register", { hostname: "viafm", access_code: s.accessCode }, undefined, "192.0.2.90")).json().studio_token;
+    const through = await on("/v1/ddns/update", { port: 25433, via: "tunnel" }, token, "198.51.100.44");
+    expect(through.json()).toMatchObject({ ip: "198.51.100.44", via: "tunnel", fqdn: "viafm.example.test" });
+    expect(edged.provider.get("viafm.example.test", "A")).toEqual(["203.0.113.50"]);
+    const row = async () => (await db.query("SELECT last_ip, via FROM studios st JOIN subdomains s ON s.id = st.subdomain_id WHERE s.label = 'viafm'")).rows[0];
+    expect(await row()).toEqual({ last_ip: "198.51.100.44", via: "tunnel" });
+    // Back to direct: the name follows the station again.
+    await on("/v1/ddns/update", { port: 25433, via: "direct" }, token, "198.51.100.44");
+    expect(edged.provider.get("viafm.example.test", "A")).toEqual(["198.51.100.44"]);
+    expect((await row()).via).toBe("direct");
+    // Nonsense is refused; and a platform without an edge stays direct whatever is asked.
+    expect((await on("/v1/ddns/update", { port: 25433, via: "sideways" }, token)).statusCode).toBe(400);
+    const plain = await registered("plainviafm");
+    const asked = await post("/v1/ddns/update", { port: 25433, via: "tunnel" }, plain.studio_token, "198.51.100.45");
+    expect(asked.json().via).toBe("direct");
+    expect(p.provider.get("plainviafm.example.test", "A")).toEqual(["198.51.100.45"]);
+  });
+
+  it("checks a station's token for the edge, with the edge's own token", async () => {
+    const s = await station("authfm");
+    const token = (await on("/v1/studio/register", { hostname: "authfm", access_code: s.accessCode }, undefined, "192.0.2.91")).json().studio_token;
+    const ask = (studioToken: string, edgeToken = "edge-token") => on("/internal/edge/auth", { token: studioToken }, edgeToken);
+    expect((await ask(token, "wrong")).statusCode).toBe(401);
+    expect((await ask(token)).json()).toMatchObject({ ok: true, fqdn: "authfm.example.test" });
+    expect((await ask("not-a-token")).json()).toMatchObject({ ok: false, code: "invalid_token" });
+    await subs.setSuspended(ctx(), { id: s.owner, ip: null, admin: true }, s.id, true);
+    expect((await ask(token)).json()).toMatchObject({ ok: false, code: "suspended" });
+  });
+
+  it("hands the edge its certificate with the edge's token only", async () => {
+    const cert = (token: string) => edgeApi.inject({ method: "GET", url: "/internal/edge-cert", headers: { authorization: `Bearer ${token}` } });
+    expect((await cert("usage-token")).statusCode).toBe(401); // coturn's token is not the edge's
+    expect((await cert("edge-token")).statusCode).toBe(404); // not issued yet
+    await db.query("INSERT INTO platform_certs (name, key_enc, cert_pem) VALUES ('edge', $1, 'CERT') ON CONFLICT (name) DO UPDATE SET cert_pem = 'CERT'",
+      [(await import("../src/lib/secrets.js")).encrypt("session-secret", "KEY")]);
+    expect((await cert("edge-token")).json()).toMatchObject({ cert_pem: "CERT", key_pem: "KEY" });
+  });
+
+  it("restored or renamed, a station that comes in through the edge stays pointed at the edge", async () => {
+    const s = await station("keepfm");
+    const token = (await on("/v1/studio/register", { hostname: "keepfm", access_code: s.accessCode }, undefined, "192.0.2.92")).json().studio_token;
+    await on("/v1/ddns/update", { port: 25433, via: "tunnel" }, token, "198.51.100.61");
+    const c = { ...ctx(), dns: edged.dns, edgeIp: "203.0.113.50" };
+    await subs.setSuspended(c, { id: s.owner, ip: null, admin: true }, s.id, true);
+    expect(edged.provider.get("keepfm.example.test", "A")).toEqual([]);
+    await subs.setSuspended(c, { id: s.owner, ip: null, admin: true }, s.id, false);
+    expect(edged.provider.get("keepfm.example.test", "A")).toEqual(["203.0.113.50"]);
+    await subs.rename(c, { id: s.owner, ip: null }, s.id, "keptfm");
+    expect(edged.provider.get("keptfm.example.test", "A")).toEqual(["203.0.113.50"]);
+  });
+
+  it("edge is the platform's name: no station may take it", async () => {
+    const owner = await person(db);
+    await expect(subs.claim(ctx(), { id: owner, ip: null }, "edge")).rejects.toThrow();
+  });
+});

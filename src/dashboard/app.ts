@@ -81,7 +81,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
   const secure = d.config.dashboardUrl.startsWith("https://");
   const names = cookieNames(secure);
   const host = new URL(d.config.dashboardUrl).host;
-  const ctx = (): subs.Ctx => ({ db: d.db, dns: d.dns, rootDomain: d.config.rootDomain, limit: d.config.subdomainLimit });
+  const ctx = (): subs.Ctx => ({ db: d.db, dns: d.dns, rootDomain: d.config.rootDomain, limit: d.config.subdomainLimit, edgeIp: d.config.edgeIp });
   const live = d.live ?? new LiveConfig(d.config, d.db, { dns: d.dns });
   const billingDeps = () => ({ db: d.db, config: d.config, mail: d.mail, fetch: d.fetch });
 

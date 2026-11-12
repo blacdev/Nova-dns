@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 /**
  * Everything the platform is told by its environment (see .env.example). Read once;
  * a missing required value stops the process with a plain message.
@@ -21,6 +23,15 @@ export interface Config {
   turnSharedSecretPrevious: string;
   turnHost: string;
   turnUsageToken: string;
+  /** The tunnel's edge (Nova's docs/TUNNEL.md): its public address. A station reached
+   *  through it is pointed here (A/AAAA). "" when the platform runs no edge: then stations
+   *  are only ever reached directly and nothing else here changes. */
+  edgeIp: string;
+  /** Where stations dial it over QUIC (UDP), "host:port"; edge.ROOT_DOMAIN:443 by default. */
+  edgeHost: string;
+  /** Shared only between the edge and the API: the edge checks stations' tokens and
+   *  fetches its certificate with it (/internal/edge/...). */
+  edgeToken: string;
   sessionSecret: string;
   smtpUrl: string;
   mailFrom: string;
@@ -51,6 +62,7 @@ const list = (v: string) => v.split(",").map((s) => s.trim()).filter(Boolean);
 
 export function loadConfig(): Config {
   const rootDomain = env("ROOT_DOMAIN").toLowerCase().replace(/\.$/, "");
+  if (env("EDGE_IP", "") && !isIP(env("EDGE_IP", ""))) throw new Error("EDGE_IP must be the edge's public address (an IP address)");
   const dnsProvider = env("DNS_PROVIDER", "cloudflare") as Config["dnsProvider"];
   if (!["cloudflare", "memory", "challtestsrv"].includes(dnsProvider)) throw new Error("DNS_PROVIDER must be cloudflare, memory or challtestsrv");
   return {
@@ -68,6 +80,9 @@ export function loadConfig(): Config {
     turnSharedSecretPrevious: env("TURN_SHARED_SECRET_PREVIOUS", ""),
     turnHost: env("TURN_HOST", `turn.${rootDomain}`),
     turnUsageToken: env("TURN_USAGE_TOKEN", ""),
+    edgeIp: env("EDGE_IP", ""),
+    edgeHost: env("EDGE_HOST", `edge.${rootDomain}:443`),
+    edgeToken: env("EDGE_TOKEN", ""),
     sessionSecret: env("SESSION_SECRET"),
     smtpUrl: env("SMTP_URL", ""),
     mailFrom: env("MAIL_FROM", `Nova <no-reply@${rootDomain}>`),

@@ -15,6 +15,7 @@
  * | prune        | 1 day   | audit, usage and operations rows past their retention         |
  * | alert        | 1 day   | email admins the DNS/ACME failures not yet reported           |
  * | platform-cert| 6 h     | turn.<root>'s own certificate for coturn (30 days ahead)      |
+ * | edge-cert    | 6 h     | edge.<root>'s, while the tunnel's edge runs (EDGE_IP)          |
  */
 
 import { recheckPending, remindExpiring } from "../billing/billing.js";
@@ -102,6 +103,8 @@ export function jobsFor(d: JobDeps): Job[] {
     // Appended, so earlier jobs keep their lock numbers.
     { name: "payments", everyMs: 600_000, run: () => recheckPending({ db: d.db, config: d.config, mail: d.mail }) },
     { name: "plan-reminders", everyMs: 6 * 3600_000, run: () => remindExpiring({ db: d.db, config: d.config, mail: d.mail }) },
+    // edge.<root>'s certificate, while the platform runs the tunnel's edge (EDGE_IP).
+    { name: "edge-cert", everyMs: 6 * 3600_000, run: async () => (d.config.edgeIp ? d.issuer.ensurePlatformCert("edge") : false) },
   ];
 }
 
