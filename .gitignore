@@ -6,3 +6,6 @@ dist/
 coverage/
 
 /docker-compose.proxy.yml
+
+# The edge (Rust)
+edge/target/

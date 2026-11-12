@@ -5,8 +5,9 @@ The central service behind Nova's **Remote Studio**: station owners claim a subd
 certificate, and hands out STUN/TURN credentials so presenters' audio always connects.
 
 It is a phone book (DNS), a certificate front-end and an audio relay of last resort. It
-never carries the studio's interface or audio itself (only TURN does, when a direct
-connection fails): presenters' browsers connect straight to Nova.
+never sees the studio's interface or audio: presenters' browsers connect straight to Nova,
+or, for a station that opens no port, through the **edge**, which passes their connection
+on still encrypted (TLS ends in Nova). Only TURN relays audio, when a direct connection fails.
 
 | Part | Address | What |
 | --- | --- | --- |
@@ -14,6 +15,7 @@ connection fails): presenters' browsers connect straight to Nova.
 | Dashboard | `app.ROOT_DOMAIN` | owners: account, claim/rename/regenerate/delete; admins |
 | Worker | (no address) | certificates (ACME DNS-01), renewals, DNS retries, cleanup, alerts |
 | coturn | `turn.ROOT_DOMAIN` | STUN/TURN on its own host, with a usage shipper |
+| Edge (optional) | `edge.ROOT_DOMAIN` | the tunnel for stations that open no port: QUIC from stations, presenters passed down by name (Rust, `edge/`) |
 
 Stack: TypeScript on Node 22, Fastify, PostgreSQL 16, acme-client, coturn, Caddy, Docker
 Compose. DNS: Cloudflare (the free plan is enough).
@@ -136,6 +138,25 @@ The shipper fetches `turn.ROOT_DOMAIN`'s certificate from the platform (the work
 it by DNS-01) and reloads coturn (SIGUSR2); it also reports relayed bytes and sessions per
 studio.
 
+**Edge host** (optional; its own machine, like TURN: Nova's docs/TUNNEL.md). Stations
+behind a router that forwards nothing, or an internet provider that shares one address
+among many customers, dial out to it; presenters reach them through it. Nova uses it by
+itself when the platform's probe cannot reach a station directly.
+
+```bash
+cd deploy/edge
+cp ../../.env.example .env  # EDGE_API_BASE, EDGE_TOKEN
+docker compose up -d --build
+```
+
+Open UDP 443 (stations) and TCP 443 and 25433 (presenters). Point `edge.ROOT_DOMAIN` at
+this host, and on the platform set `EDGE_IP` to its address and the same `EDGE_TOKEN`; the
+worker then issues `edge.ROOT_DOMAIN`'s certificate, which the edge fetches and keeps
+current. Every presenter's page and live-link message goes through it: put it near the
+stations. It limits connections per presenter address (96) and in total (8192), and
+checks each signed-in station again every 5 minutes (a suspended or renamed one is let
+go). Its tests: `cd edge && cargo test`.
+
 **Rotating the TURN secret**: set the new value as `TURN_SHARED_SECRET` everywhere and the
 old one as `TURN_SHARED_SECRET_PREVIOUS` on the TURN host (coturn accepts both). After 6
 hours (the credentials' lifetime) remove the previous one.
@@ -170,12 +191,23 @@ JSON over HTTPS. Errors are `{"error": {"code", "message"}}`. Authenticated call
 
 | Call | Notes |
 | --- | --- |
-| `POST /v1/studio/register` `{hostname, access_code, install_id, app_version}` | 200 `{studio_token, token_expires_at, fqdn, studio_id}`; 401 `invalid_credentials`, 403 `suspended`, 404 `hostname_not_found`; 10 tries / 10 min per IP and per hostname; tokens 30 days, kept as hashes |
-| `POST /v1/ddns/update` `{ip_override, port}` | the heartbeat; A or AAAA, TTL 60, provider called only on a change; `{ip, changed, dns_status, fqdn}` (always the current FQDN) |
+| `POST /v1/studio/register` `{hostname, access_code, install_id, app_version}` | 200 `{studio_token, token_expires_at, fqdn, studio_id, tunnel?}` (`tunnel: {edge, server_name}` while the edge runs); 401 `invalid_credentials`, 403 `suspended`, 404 `hostname_not_found`; 10 tries / 10 min per IP and per hostname; tokens 30 days, kept as hashes |
+| `POST /v1/ddns/update` `{ip_override, port, via?}` | the heartbeat; A or AAAA, TTL 60, provider called only on a change; `{ip, changed, dns_status, fqdn, via}` (always the current FQDN). `via: "tunnel"` points the name at the edge (`EDGE_IP`) while `ip` stays the station's own (the probe uses it); without an edge it is always `direct` |
 | `POST /v1/cert/csr` `{csr_pem}` | 202 `{status: "pending"}`; the CSR may name only the studio's FQDN |
 | `GET /v1/cert` | `{status, cert_pem, chain_pem, expires_at, serial}` |
 | `POST /v1/reachability/probe` `{port}` | `{reachable, latency_ms, error}`; 1 per 10 s; never into private networks |
 | `GET /v1/ice-servers` | STUN + TURN, coturn REST credentials valid 6 h |
+
+The edge's own calls, with `EDGE_TOKEN`: `POST /internal/edge/auth {token}` (is a station's
+token good: `{ok, fqdn}` or `{ok: false, code: invalid_token | suspended, message}`) and
+`GET /internal/edge-cert` (edge.ROOT_DOMAIN's certificate and key; 404 until issued).
+
+**The edge's protocol** (shared with Nova's `apps/tunnel`; must match exactly): QUIC, ALPN
+`nova-tunnel/1`. A station opens one stream and sends `{"v":1,"token":...}` as a line; the
+edge answers `{"ok":true,"fqdn":...}` or `{"ok":false,"code","message"}` (`try_later`
+when the API cannot be asked) and keeps the stream open. For each presenter the edge reads
+the first TLS record, finds the station by its SNI name, opens a stream to it and writes a
+PROXY v2 header (the presenter's address), the record, then copies both ways.
 
 ## How it is built
 
@@ -189,8 +221,9 @@ JSON over HTTPS. Errors are `{"error": {"code", "message"}}`. Authenticated call
 | `src/acme/` | certificates by DNS-01, ARI renewals, the weekly-limit queue, revocation |
 | `src/worker/` | background jobs, each with its own advisory lock |
 | `src/turn/` | the coturn host's usage shipper and certificate keeper |
+| `edge/` | the tunnel's edge (Rust: quinn, rustls), its tests and Dockerfile |
 | `src/db/migrations/` | the schema (additive files) |
-| `deploy/` | Caddy, coturn config and its Compose file |
+| `deploy/` | Caddy, coturn config and its Compose file, the edge's Compose file |
 
 Choices made where the spec left room:
 

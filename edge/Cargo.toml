@@ -1,0 +1,28 @@
+[package]
+name = "nova-edge"
+version = "0.1.0"
+edition = "2021"
+description = "The tunnel's edge: stations dial in over QUIC, presenters' connections are passed down to them by name, still encrypted (Nova's docs/TUNNEL.md)."
+license = "MIT"
+publish = false
+
+[lib]
+name = "nova_edge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nova-edge"
+path = "src/main.rs"
+
+[dependencies]
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+rcgen = "0.13"
+webpki-roots = "1"
