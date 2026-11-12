@@ -3,8 +3,8 @@
 # station, still encrypted. It needs a public address and UDP 443 and TCP 443 to itself,
 # so it does not share a host with Caddy (which takes TCP 443, and UDP 443 for HTTP/3).
 #
-#   cp ../../.env.example .env   # EDGE_API_BASE, EDGE_TOKEN (the API's EDGE_TOKEN)
-#   docker compose up -d --build
+#   ./setup.sh edge              # from the repository's root: asks, tests, writes .env, starts
+#   (by hand: .env with EDGE_API_BASE and the API's EDGE_TOKEN, then docker compose up -d --build)
 # Firewall: UDP 443 (stations), TCP 443 and TCP 25433 (presenters).
 # DNS: edge.ROOT_DOMAIN -> this host. On the platform: EDGE_IP=<this host's address>.
 name: nova-edge

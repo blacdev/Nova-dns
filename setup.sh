@@ -4,10 +4,12 @@
 #   ./setup.sh             asks what to set up
 #   ./setup.sh platform    the API, dashboard, worker and database (docker-compose.yml)
 #   ./setup.sh turn        the TURN relay (deploy/turn), on a machine with a public address
+#   ./setup.sh edge        the tunnel's edge (deploy/edge), on a machine with a public address:
+#                          stations that open no port on their router are reached through it
 #   ./setup.sh check       tests an existing setup: Cloudflare, DNS records, containers, the API
 #   ./setup.sh --dry-run   writes the settings files and shows the commands, starts nothing
 #
-# It writes .env (and deploy/turn/.env) from your answers, makes every secret itself, and
+# It writes .env (and deploy/turn/.env, deploy/edge/.env) from your answers, makes every secret itself, and
 # starts the containers. Run it again to change an answer: what you gave before is the
 # default. Needs Docker with the compose plugin, and openssl (or /dev/urandom); with curl
 # it also tests your Cloudflare token and can add the platform's DNS records for you.
@@ -21,8 +23,8 @@ MODE=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
-    platform|turn|both|check) MODE="$a" ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    platform|turn|edge|both|check) MODE="$a" ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -129,6 +131,16 @@ need_docker() {
 }
 
 resolves_to() { getent ahosts "$1" 2>/dev/null | awk 'NR==1 {print $1}'; }
+is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$1" == *:*:* && "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
+ask_ip() { # ask_ip VAR "question" default: an IPv4 or IPv6 address
+  local var=$1
+  while :; do
+    ask_required "$@"
+    is_ip "${!var}" && return 0
+    [ "$INPUT_ENDED" = 1 ] && fail "\"${!var}\" is not an IP address."
+    warn "That is not an IP address. Give it like: 203.0.113.50"
+  done
+}
 
 # ---------------------------------------------------------------- Cloudflare
 # The same checks as the dashboard's Admin > Setup page, with the same wording as
@@ -346,6 +358,26 @@ setup_platform() {
   note "Made (or kept) the database password, the session secret and the TURN secrets."
   [ -n "$(old SESSION_SECRET)" ] || note "Keep .env safe: a new SESSION_SECRET signs everyone out."
 
+  bold "7. The tunnel's edge (optional)"
+  note "Stations behind a router that forwards nothing, or an internet provider that shares one"
+  note "address among many customers, cannot be reached directly. With an edge they dial out to"
+  note "it and presenters reach them through it (Nova does this by itself; TLS still ends in Nova)."
+  note "It runs on its own machine with a public address: it needs ports 443, which this machine's"
+  note "Caddy or proxy already uses. Set it up there afterwards with: ./setup.sh edge"
+  local was_edge=no
+  [ -n "$(old EDGE_IP)" ] && was_edge=yes
+  choose EDGE "Run an edge" "$was_edge" yes no
+  EDGE_IP=""; EDGE_HOST=""
+  EDGE_TOKEN=$(old EDGE_TOKEN)
+  if [ "$EDGE" = yes ]; then
+    ask_ip EDGE_IP "The edge machine's public IP address" "$(old EDGE_IP)"
+    EDGE_HOST=$(old EDGE_HOST "edge.$ROOT_DOMAIN:443")
+    EDGE_TOKEN=$(keep_or_new EDGE_TOKEN 32)
+    note "Made (or kept) EDGE_TOKEN, which the edge uses to ask this platform about stations."
+  else
+    note "No edge: stations are only reached directly (open port 25433 on their router)."
+  fi
+
   declare -gA ENV=(
     [ROOT_DOMAIN]=$ROOT_DOMAIN [DASHBOARD_URL]="https://app.$ROOT_DOMAIN"
     [POSTGRES_PASSWORD]=$POSTGRES_PASSWORD
@@ -358,11 +390,12 @@ setup_platform() {
     [ADMIN_EMAILS]=$ADMIN_EMAILS [SUBDOMAIN_LIMIT]=$(old SUBDOMAIN_LIMIT 1)
     [TRUSTED_PROXIES]=$TRUSTED_PROXIES [API_PORT]=$API_PORT [DASHBOARD_PORT]=$DASHBOARD_PORT
     [PROXY_IP]=${PROXY_IP:-}
+    [EDGE_IP]=$EDGE_IP [EDGE_HOST]=$EDGE_HOST [EDGE_TOKEN]=$EDGE_TOKEN
   )
   ENV_ORDER=(ROOT_DOMAIN DASHBOARD_URL POSTGRES_PASSWORD DATABASE_URL DNS_PROVIDER CLOUDFLARE_API_TOKEN
     CLOUDFLARE_ZONE_ID ACME_DIRECTORY_URL ACME_EMAIL CERT_WEEKLY_LIMIT TURN_SHARED_SECRET
     TURN_SHARED_SECRET_PREVIOUS TURN_HOST TURN_USAGE_TOKEN API_BASE SESSION_SECRET SMTP_URL MAIL_FROM
-    ADMIN_EMAILS SUBDOMAIN_LIMIT TRUSTED_PROXIES API_PORT DASHBOARD_PORT PROXY_IP)
+    ADMIN_EMAILS SUBDOMAIN_LIMIT TRUSTED_PROXIES API_PORT DASHBOARD_PORT PROXY_IP EDGE_IP EDGE_HOST EDGE_TOKEN)
   if [ -f .env ] && [ -n "$(old POSTGRES_PASSWORD)" ] && [ "$(old POSTGRES_PASSWORD)" != "$POSTGRES_PASSWORD" ]; then
     warn "The database password changed; an existing database keeps its old one. Keep the old .env if it has data."
   fi
@@ -388,7 +421,7 @@ YAML
     rm -f docker-compose.proxy.yml
   fi
 
-  bold "7. The platform's own DNS records"
+  bold "8. The platform's own DNS records"
   local a name ip="" add=no names=("api.$ROOT_DOMAIN" "app.$ROOT_DOMAIN")
   [ "$MODE" = both ] && names+=("turn.$ROOT_DOMAIN")
   if [ "$CF_OK" = 1 ]; then
@@ -410,8 +443,17 @@ YAML
     note "Add them at your DNS provider as A records, DNS only ($CF_GUIDE, step 6)."
   fi
   [ "$MODE" = both ] || note "turn.$ROOT_DOMAIN -> the TURN machine's public IP (add it by hand; then ./setup.sh turn there)"
+  if [ "$EDGE" = yes ]; then
+    # Its own machine, its own address.
+    if [ "$CF_OK" = 1 ] && [ "$add" = yes ]; then
+      cf_point "edge.$ROOT_DOMAIN" "$EDGE_IP"
+    else
+      a=$(resolves_to "edge.$ROOT_DOMAIN" || true)
+      note "edge.$ROOT_DOMAIN -> ${a:-(not found yet)}   should be $EDGE_IP (the edge machine)"
+    fi
+  fi
 
-  bold "8. Starting"
+  bold "9. Starting"
   run "${compose[@]}" config --quiet
   run "${compose[@]}" up -d --build "${services[@]}"
   if [ "$DRY" = 0 ]; then
@@ -422,6 +464,15 @@ YAML
       sleep 3
     done
     [ "$ok" = 1 ] && note "The API is up." || warn "The API did not answer within 3 minutes: ${compose[*]} logs api migrate"
+    if [ "$EDGE" = yes ] && [ "$ok" = 1 ]; then
+      # edge.ROOT_DOMAIN is the platform's from now on; a station that already had the name keeps it.
+      local taken
+      taken=$("${compose[@]}" exec -T postgres psql -U nova -d nova -tAc "SELECT 1 FROM subdomains WHERE label = 'edge'" 2>/dev/null || true)
+      if [ -n "$taken" ]; then
+        warn "A station is already called \"edge\": the edge's name and certificate clash with it."
+        warn "Rename that station in the dashboard (Admin > Stations) before using the edge."
+      fi
+    fi
   fi
 
   bold "Next"
@@ -440,6 +491,12 @@ YAML
   note "  TURN_SHARED_SECRET=$TURN_SHARED_SECRET"
   note "  TURN_USAGE_TOKEN=$TURN_USAGE_TOKEN"
   note "  API_BASE=https://api.$ROOT_DOMAIN   TURN_HOST=turn.$ROOT_DOMAIN"
+  if [ "$EDGE" = yes ]; then
+    note "On the edge machine ($EDGE_IP): ./setup.sh edge, with these values:"
+    note "  EDGE_API_BASE=https://api.$ROOT_DOMAIN"
+    note "  EDGE_TOKEN=$EDGE_TOKEN"
+    note "The worker issues edge.$ROOT_DOMAIN's certificate once its DNS record is in place."
+  fi
   note "In Nova, put this in <Nova Data>/remote/config.json, then restart Nova:"
   note "  {\"root_domain\": \"$ROOT_DOMAIN\", \"api_base\": \"https://api.$ROOT_DOMAIN\"}"
   note "Later, the same command again: ${compose[*]} up -d --build ${services[*]}"
@@ -522,6 +579,94 @@ setup_turn() {
   note "Logs: docker compose -f deploy/turn/docker-compose.yml logs -f"
 }
 
+# ---------------------------------------------------------------- the tunnel's edge
+
+setup_edge() {
+  bold "The tunnel's edge: stations that open no port on their router are reached through it"
+  note "Stations dial out to it over QUIC; presenters' browsers connect to it and are passed on to"
+  note "their station, still encrypted (it never sees a page, a sign-in or a voice)."
+  note "It needs its own public address and ports 443 (UDP and TCP) and 25433 (TCP): not a"
+  note "machine where Caddy or another web server already has 443."
+  load_old .env
+  load_old deploy/edge/.env
+  need_docker
+
+  ask_domain ROOT_DOMAIN "Domain (as on the platform)" "$(old ROOT_DOMAIN)"
+  ask_required EDGE_API_BASE "The platform's API" "$(old EDGE_API_BASE "$(old API_BASE "https://api.$ROOT_DOMAIN")")"
+  EDGE_API_BASE=${EDGE_API_BASE%/}
+  note "EDGE_TOKEN comes from the platform's .env (./setup.sh platform printed it)."
+  ask_secret EDGE_TOKEN "EDGE_TOKEN" "$(old EDGE_TOKEN)"
+  EDGE_QUIC=$(old EDGE_QUIC "0.0.0.0:443"); EDGE_PUBLIC=$(old EDGE_PUBLIC "0.0.0.0:443,0.0.0.0:25433")
+
+  bold "Testing it with the platform"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl is not installed, so the token and the API were not tested."
+  else
+    local code
+    # Asking about a station that does not exist: 200 means the token is right.
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$EDGE_API_BASE/internal/edge/auth" \
+      -H "Authorization: Bearer $EDGE_TOKEN" -H 'Content-Type: application/json' -d '{"token":"setup-check"}' 2>/dev/null || true)
+    case "$code" in
+      200) good "The platform's API accepts this EDGE_TOKEN." ;;
+      401) fail "The platform refused this EDGE_TOKEN: copy it again from the platform's .env (EDGE_TOKEN), and make sure the platform was started again after setting it." ;;
+      404) fail "The platform's API does not know the edge yet: update the platform (git pull, ./setup.sh platform) and try again." ;;
+      000|"") fail "Could not reach $EDGE_API_BASE from here. Check the address and that this machine can reach the internet." ;;
+      *) fail "The platform's API answered $code. Check its logs: docker compose logs api" ;;
+    esac
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Authorization: Bearer $EDGE_TOKEN" "$EDGE_API_BASE/internal/edge-cert" 2>/dev/null || true)
+    case "$code" in
+      200) good "edge.$ROOT_DOMAIN's certificate is ready." ;;
+      404) warn "edge.$ROOT_DOMAIN's certificate is not issued yet: the edge waits for it and starts by itself."
+           note "The platform's worker issues it once EDGE_IP is set there and the DNS record below exists." ;;
+      *) warn "Could not ask about the certificate (it answered $code)." ;;
+    esac
+  fi
+  local here a
+  here=$(public_ip)
+  a=$(resolves_to "edge.$ROOT_DOMAIN" || true)
+  if [ -z "$a" ]; then
+    warn "edge.$ROOT_DOMAIN is not found yet: add an A record to this machine's public IP${here:+ ($here)}, DNS only."
+  elif [ -n "$here" ] && [ "$a" != "$here" ]; then
+    warn "edge.$ROOT_DOMAIN points at $a, but this machine is $here on the internet. Correct one of them."
+  else
+    good "edge.$ROOT_DOMAIN -> $a"
+  fi
+
+  declare -gA ENV=(
+    [ROOT_DOMAIN]=$ROOT_DOMAIN [EDGE_API_BASE]=$EDGE_API_BASE [EDGE_TOKEN]=$EDGE_TOKEN
+    [EDGE_QUIC]=$EDGE_QUIC [EDGE_PUBLIC]=$EDGE_PUBLIC
+  )
+  ENV_ORDER=(ROOT_DOMAIN EDGE_API_BASE EDGE_TOKEN EDGE_QUIC EDGE_PUBLIC)
+  write_env deploy/edge/.env
+
+  bold "Starting"
+  run docker compose -f deploy/edge/docker-compose.yml config --quiet
+  run docker compose -f deploy/edge/docker-compose.yml up -d --build --force-recreate
+  if [ "$DRY" = 0 ]; then
+    note "Waiting for the edge to listen (it first waits for its certificate)..."
+    local ok=0
+    for _ in $(seq 1 20); do
+      if docker compose -f deploy/edge/docker-compose.yml logs edge 2>/dev/null | grep -q "listening:"; then ok=1; break; fi
+      sleep 3
+    done
+    if [ "$ok" = 1 ]; then
+      good "The edge is listening."
+    else
+      warn "Not listening yet. Most often it is still waiting for its certificate; it starts by itself."
+      note "Watch it: docker compose -f deploy/edge/docker-compose.yml logs -f"
+    fi
+  fi
+
+  bold "Next"
+  note "Open on this machine's firewall (and the cloud provider's):"
+  note "  UDP 443   stations dial in"
+  note "  TCP 443   presenters"
+  note "  TCP 25433 presenters, with the addresses stations already gave out"
+  note "Stations need Nova 0.2.27 or later; they use the edge by themselves when they cannot"
+  note "be reached directly (Settings > Remote access > How presenters reach this station)."
+  note "Logs: docker compose -f deploy/edge/docker-compose.yml logs -f"
+}
+
 # ---------------------------------------------------------------- check
 
 setup_check() {
@@ -569,6 +714,27 @@ setup_check() {
     fi
   done
 
+  if [ -n "$(old EDGE_IP)" ]; then
+    bold "The tunnel's edge"
+    a=$(resolves_to "edge.$ROOT_DOMAIN" || true)
+    if [ -z "$a" ]; then
+      bad "edge.$ROOT_DOMAIN is not found. Add an A record to $(old EDGE_IP), DNS only."
+    elif [ "$a" != "$(old EDGE_IP)" ]; then
+      bad "edge.$ROOT_DOMAIN points at $a, but EDGE_IP is $(old EDGE_IP)."
+    else
+      good "edge.$ROOT_DOMAIN -> $a"
+    fi
+    [ -n "$(old EDGE_TOKEN)" ] || bad "EDGE_TOKEN is empty: run ./setup.sh platform again."
+    if command -v timeout >/dev/null 2>&1; then
+      if timeout 5 bash -c "</dev/tcp/$(old EDGE_IP)/443" 2>/dev/null; then
+        # Only that something takes TCP 443 there; ./setup.sh edge on that machine checks the edge itself.
+        good "$(old EDGE_IP) takes connections on TCP 443 (the edge's own check: ./setup.sh edge there)."
+      else
+        bad "Nothing answers on $(old EDGE_IP) TCP 443: is the edge running (./setup.sh edge there) and the port open?"
+      fi
+    fi
+  fi
+
   bold "Containers"
   local compose=(docker compose -f docker-compose.yml) want=(postgres api dashboard worker) running svc
   if [ -f docker-compose.proxy.yml ]; then compose+=(-f docker-compose.proxy.yml); else want+=(caddy); fi
@@ -584,6 +750,19 @@ setup_check() {
         good "The API answers on this machine."
       else
         bad "The API does not answer: ${compose[*]} logs api migrate"
+      fi
+      if [ -n "$(old EDGE_IP)" ]; then
+        local edge_cert
+        edge_cert=$("${compose[@]}" exec -T postgres psql -U nova -d nova -tAc \
+          "SELECT CASE WHEN cert_pem IS NOT NULL THEN 'issued, until ' || to_char(expires_at, 'YYYY-MM-DD') ELSE coalesce('failed: ' || error, 'not yet') END FROM platform_certs WHERE name = 'edge'" 2>/dev/null || true)
+        case "$edge_cert" in
+          issued*) good "edge.$ROOT_DOMAIN's certificate: $edge_cert" ;;
+          failed*) bad "edge.$ROOT_DOMAIN's certificate $edge_cert" ;;
+          *) warn "edge.$ROOT_DOMAIN's certificate is not issued yet (the worker tries every 6 hours; restart it to try now)." ;;
+        esac
+        if [ -n "$("${compose[@]}" exec -T postgres psql -U nova -d nova -tAc "SELECT 1 FROM subdomains WHERE label = 'edge'" 2>/dev/null || true)" ]; then
+          bad "A station is called \"edge\": rename it (Admin > Stations); the edge needs that name."
+        fi
       fi
     fi
   fi
@@ -612,14 +791,16 @@ if [ -z "$MODE" ]; then
   bold "What should this machine run?"
   note "platform: the API, dashboard, worker and database"
   note "turn:     the audio relay (needs its own public address)"
+  note "edge:     the tunnel's edge, for stations that open no port (its own public address)"
   note "both:     everything on one machine with a public address"
   note "check:    change nothing; test a setup that is already there"
-  choose MODE "Set up" platform platform turn both check
+  choose MODE "Set up" platform platform turn edge both check
 fi
 [ "$DRY" = 1 ] && note "(dry run: settings files are written, nothing is started)"
 case "$MODE" in
   platform) setup_platform ;;
   turn) setup_turn ;;
+  edge) setup_edge ;;
   both) setup_platform; OLD=(); setup_turn ;;
   check) setup_check ;;
 esac
