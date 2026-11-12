@@ -143,16 +143,21 @@ behind a router that forwards nothing, or an internet provider that shares one a
 among many customers, dial out to it; presenters reach them through it. Nova uses it by
 itself when the platform's probe cannot reach a station directly.
 
-```bash
-cd deploy/edge
-cp ../../.env.example .env  # EDGE_API_BASE, EDGE_TOKEN
-docker compose up -d --build
-```
+1. On the platform machine: `./setup.sh platform`, and answer **yes** at "Run an edge" with
+   the edge machine's public address. It makes `EDGE_TOKEN`, adds `edge.ROOT_DOMAIN` at
+   Cloudflare (when it adds the others), warns if a station already holds the name `edge`,
+   and prints what the edge machine needs.
+2. On the edge machine: `./setup.sh edge`. It asks for the domain, the API and that token,
+   tests the token with the platform before starting anything, checks `edge.ROOT_DOMAIN`
+   points at this machine, starts the edge and says which ports to open: UDP 443
+   (stations), TCP 443 and 25433 (presenters).
+3. `./setup.sh check` on the platform includes the edge: its DNS record, its certificate,
+   the name `edge`, and whether its address takes connections.
 
-Open UDP 443 (stations) and TCP 443 and 25433 (presenters). Point `edge.ROOT_DOMAIN` at
-this host, and on the platform set `EDGE_IP` to its address and the same `EDGE_TOKEN`; the
-worker then issues `edge.ROOT_DOMAIN`'s certificate, which the edge fetches and keeps
-current. Every presenter's page and live-link message goes through it: put it near the
+The worker issues `edge.ROOT_DOMAIN`'s certificate; the edge fetches it and keeps it
+current. By hand instead: `EDGE_IP` and `EDGE_TOKEN` in the platform's `.env`, and in
+`deploy/edge/.env` `EDGE_API_BASE` and the same `EDGE_TOKEN`, then
+`docker compose -f deploy/edge/docker-compose.yml up -d --build`. Every presenter's page and live-link message goes through it: put it near the
 stations. It limits connections per presenter address (96) and in total (8192), and
 checks each signed-in station again every 5 minutes (a suspended or renamed one is let
 go). Its tests: `cd edge && cargo test`.
