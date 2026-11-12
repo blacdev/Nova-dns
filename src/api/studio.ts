@@ -79,10 +79,11 @@ export async function register(d: Deps, body: Record<string, unknown>, ip: strin
 }
 
 /** The tunnel's edge, offered to every station while the platform runs one (Nova's
- *  docs/TUNNEL.md): where to dial (QUIC) and the name on the edge's certificate. */
-export function tunnelOffer(d: Deps): { tunnel?: { edge: string; server_name: string } } {
+ *  docs/TUNNEL.md): where to dial (QUIC), the name on the edge's certificate, and the TCP
+ *  ports presenters reach it on (so the station gives out an address the edge serves). */
+export function tunnelOffer(d: Deps): { tunnel?: { edge: string; server_name: string; ports: number[] } } {
   if (!d.config.edgeIp) return {};
-  return { tunnel: { edge: d.config.edgeHost, server_name: `edge.${d.config.rootDomain}` } };
+  return { tunnel: { edge: d.config.edgeHost, server_name: `edge.${d.config.rootDomain}`, ports: d.config.edgePorts } };
 }
 
 // ---------------------------------------------------------------- who is calling

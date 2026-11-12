@@ -29,6 +29,10 @@ export interface Config {
   edgeIp: string;
   /** Where stations dial it over QUIC (UDP), "host:port"; edge.ROOT_DOMAIN:443 by default. */
   edgeHost: string;
+  /** The TCP ports presenters reach it on (EDGE_PORTS, "443,25433" by default). Behind a
+   *  reverse proxy that keeps 443 (Nginx Proxy Manager) it is 25433 alone. Told to stations,
+   *  so the address they give out names a port the edge serves. */
+  edgePorts: number[];
   /** Shared only between the edge and the API: the edge checks stations' tokens and
    *  fetches its certificate with it (/internal/edge/...). */
   edgeToken: string;
@@ -59,6 +63,11 @@ function env(name: string, fallback?: string): string {
 }
 
 const list = (v: string) => v.split(",").map((s) => s.trim()).filter(Boolean);
+const ports = (v: string) => {
+  const found = list(v).map(Number);
+  if (!found.length || found.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) throw new Error("EDGE_PORTS must be ports, comma separated, e.g. 443,25433");
+  return found;
+};
 
 export function loadConfig(): Config {
   const rootDomain = env("ROOT_DOMAIN").toLowerCase().replace(/\.$/, "");
@@ -82,6 +91,7 @@ export function loadConfig(): Config {
     turnUsageToken: env("TURN_USAGE_TOKEN", ""),
     edgeIp: env("EDGE_IP", ""),
     edgeHost: env("EDGE_HOST", `edge.${rootDomain}:443`),
+    edgePorts: ports(env("EDGE_PORTS", "443,25433")),
     edgeToken: env("EDGE_TOKEN", ""),
     sessionSecret: env("SESSION_SECRET"),
     smtpUrl: env("SMTP_URL", ""),

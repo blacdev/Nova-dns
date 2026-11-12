@@ -1,11 +1,12 @@
 # The tunnel's edge on its own host (Nova's docs/TUNNEL.md): stations that open no port
 # dial in here over QUIC; presenters' browsers connect here and are passed down to their
-# station, still encrypted. It needs a public address and UDP 443 and TCP 443 to itself,
-# so it does not share a host with Caddy (which takes TCP 443, and UDP 443 for HTTP/3).
+# station, still encrypted. It needs a UDP port (stations) and TCP port(s) (presenters)
+# forwarded straight to it, never through a reverse proxy: EDGE_QUIC and EDGE_PUBLIC in .env
+# (./setup.sh edge writes them). Behind Nginx Proxy Manager, which keeps TCP 443: TCP 25433.
 #
 #   ./setup.sh edge              # from the repository's root: asks, tests, writes .env, starts
 #   (by hand: .env with EDGE_API_BASE and the API's EDGE_TOKEN, then docker compose up -d --build)
-# Firewall: UDP 443 (stations), TCP 443 and TCP 25433 (presenters).
+# Firewall and router: the UDP port (stations) and the TCP port(s) (presenters).
 # DNS: edge.ROOT_DOMAIN -> this host. On the platform: EDGE_IP=<this host's address>.
 name: nova-edge
 
