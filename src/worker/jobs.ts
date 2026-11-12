@@ -17,6 +17,7 @@
  * | platform-cert| 6 h     | turn.<root>'s own certificate for coturn (30 days ahead)      |
  */
 
+import { recheckPending, remindExpiring } from "../billing/billing.js";
 import type { Db } from "../db/db.js";
 import { opsEvent } from "../lib/audit.js";
 import type { Mailer } from "../lib/mail.js";
@@ -68,7 +69,7 @@ export async function dailyAlert(d: JobDeps): Promise<number> {
     "SELECT id, kind, target, message, created_at FROM ops_events WHERE level = 'error' AND alerted_at IS NULL AND kind IN ('dns', 'acme') ORDER BY created_at");
   if (!events.rowCount) return 0;
   const admins = new Set([...d.config.adminEmails,
-    ...(await d.db.query<{ email: string }>("SELECT email FROM users WHERE role = 'admin' AND status = 'active'")).rows.map((r) => r.email.toLowerCase())]);
+    ...(await d.db.query<{ email: string }>("SELECT email FROM users WHERE role IN ('admin', 'superadmin') AND status = 'active'")).rows.map((r) => r.email.toLowerCase())]);
   const text = [`${events.rowCount} DNS/certificate problem(s) since the last report:`, "",
     ...events.rows.map((e) => `${e.created_at.toISOString()}  ${e.kind.toUpperCase()}  ${e.target ?? "-"}  ${e.message}`),
     "", `Details: ${d.config.dashboardUrl}/admin/operations`].join("\n");
@@ -98,6 +99,9 @@ export function jobsFor(d: JobDeps): Job[] {
     { name: "prune", everyMs: 86400_000, run: () => prune(d.db, d.retention) },
     { name: "alert", everyMs: 86400_000, run: () => dailyAlert(d) },
     { name: "platform-cert", everyMs: 6 * 3600_000, run: () => d.issuer.ensurePlatformCert("turn") },
+    // Appended, so earlier jobs keep their lock numbers.
+    { name: "payments", everyMs: 600_000, run: () => recheckPending({ db: d.db, config: d.config, mail: d.mail }) },
+    { name: "plan-reminders", everyMs: 6 * 3600_000, run: () => remindExpiring({ db: d.db, config: d.config, mail: d.mail }) },
   ];
 }
 

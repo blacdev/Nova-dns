@@ -45,6 +45,8 @@ function trustCa(bundle: string) {
 
 export class Issuer {
   private client: acme.Client | null = null;
+  /** The directory `client` is for: switching staging/production in the settings makes a new one. */
+  private clientUrl = "";
   private renewalInfoUrl: string | null | undefined;
 
   constructor(private d: IssuerDeps) {
@@ -53,8 +55,9 @@ export class Issuer {
 
   /** The platform's ACME account, made once and kept (encrypted). */
   async account(): Promise<acme.Client> {
-    if (this.client) return this.client;
     const url = this.d.config.acmeDirectoryUrl;
+    if (this.client && this.clientUrl === url) return this.client;
+    this.renewalInfoUrl = undefined;
     const row = (await this.d.db.query<{ key_enc: string; account_url: string | null }>("SELECT key_enc, account_url FROM acme_account WHERE directory_url = $1", [url])).rows[0];
     let key: Buffer;
     if (row) key = Buffer.from(decrypt(this.d.config.sessionSecret, row.key_enc));
@@ -68,6 +71,7 @@ export class Issuer {
       await this.d.db.query("UPDATE acme_account SET account_url = $2 WHERE directory_url = $1", [url, client.getAccountUrl()]);
     }
     this.client = client;
+    this.clientUrl = url;
     return client;
   }
 

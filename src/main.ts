@@ -8,19 +8,16 @@ import { readFileSync } from "node:fs";
 import { buildApi } from "./api/app.js";
 import { Metrics } from "./api/studio.js";
 import { Issuer } from "./acme/issuer.js";
-import { loadConfig, type Config } from "./config.js";
+import { loadConfig } from "./config.js";
 import { buildDashboard } from "./dashboard/app.js";
 import { connect, migrate, type Db } from "./db/db.js";
-import { DnsManager, type DnsProvider } from "./dns/dns.js";
-import { ChallTestSrvProvider, CloudflareProvider, MemoryProvider } from "./dns/providers.js";
-import { makeMailer } from "./lib/mail.js";
+import { DnsManager } from "./dns/dns.js";
+import { providerFor } from "./dns/providers.js";
+import { makeMailer, switchableMailer } from "./lib/mail.js";
+import { LiveConfig, watchSettings } from "./lib/settings.js";
 import { startWorker } from "./worker/jobs.js";
 
-export function providerFor(c: Config): DnsProvider {
-  if (c.dnsProvider === "cloudflare") return new CloudflareProvider(c.cloudflareApiToken, c.cloudflareZoneId);
-  if (c.dnsProvider === "challtestsrv") return new ChallTestSrvProvider(c.challTestSrvUrl);
-  return new MemoryProvider();
-}
+export { providerFor };
 
 async function main() {
   const role = process.argv[2] ?? "all";
@@ -43,9 +40,13 @@ async function main() {
   if (applied.length) console.log(`migrations applied: ${applied.join(", ")}`);
   if (role === "migrate") return db.end();
 
+  // Settings saved in the dashboard win over .env; every process follows a change at once.
   const dns = new DnsManager(db, providerFor(config), config.rootDomain);
-  const mail = makeMailer(config.smtpUrl, config.mailFrom);
-  const stops: (() => Promise<unknown>)[] = [];
+  const mail = switchableMailer(makeMailer(config.smtpUrl, config.mailFrom));
+  const live = new LiveConfig(config, db, { dns, mail });
+  await live.reload();
+  const stopWatching = watchSettings(config.databaseUrl, live);
+  const stops: (() => Promise<unknown>)[] = [stopWatching];
 
   if (role === "api" || role === "all") {
     const api = buildApi({ db, dns, config, metrics: new Metrics() });
@@ -54,7 +55,7 @@ async function main() {
     stops.push(() => api.close());
   }
   if (role === "dashboard" || role === "all") {
-    const dash = buildDashboard({ db, dns, config, mail });
+    const dash = buildDashboard({ db, dns, config, mail, live });
     await dash.listen({ host: "0.0.0.0", port: config.dashboardPort });
     console.log(`dashboard on :${config.dashboardPort}`);
     stops.push(() => dash.close());
@@ -68,7 +69,7 @@ async function main() {
       await locks.end();
     });
   }
-  if (!stops.length) throw new Error(`unknown role ${role}: use migrate, api, dashboard, worker or all`);
+  if (stops.length === 1) throw new Error(`unknown role ${role}: use migrate, api, dashboard, worker or all`);
 
   const shutdown = async () => {
     for (const stop of stops) await stop().catch(() => undefined);

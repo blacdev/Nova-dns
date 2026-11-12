@@ -4,6 +4,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import type { Config } from "../config.js";
 import type { DnsCheckStep, DnsProvider, RecordType } from "./dns.js";
 
 // ---------------------------------------------------------------- Cloudflare
@@ -191,4 +192,44 @@ export class ChallTestSrvProvider implements DnsProvider {
     if (type === "TXT") await this.post("/clear-txt", { host });
     else await this.post(type === "A" ? "/clear-a" : "/clear-aaaa", { host });
   }
+}
+
+// ---------------------------------------------------------------- not set up yet
+
+/** Cloudflare chosen, but its token or zone is missing: every change fails with a plain reason. */
+export class UnconfiguredProvider implements DnsProvider {
+  readonly name = "cloudflare";
+  private why = "Cloudflare is not set up yet: add the API token in Admin > Settings.";
+  async upsertRecord(): Promise<string | null> {
+    throw new Error(this.why);
+  }
+  async deleteRecord(): Promise<void> {
+    throw new Error(this.why);
+  }
+  async check(): Promise<DnsCheckStep[]> {
+    return [{ name: "Cloudflare API token", ok: false, detail: "No token or Zone ID yet. Add them in Admin > Settings (the guide below shows where to get them)." }];
+  }
+}
+
+/** The provider the settings ask for. */
+export function providerFor(c: Config): DnsProvider {
+  if (c.dnsProvider === "cloudflare") return c.cloudflareApiToken && c.cloudflareZoneId ? new CloudflareProvider(c.cloudflareApiToken, c.cloudflareZoneId) : new UnconfiguredProvider();
+  if (c.dnsProvider === "challtestsrv") return new ChallTestSrvProvider(c.challTestSrvUrl);
+  return new MemoryProvider();
+}
+
+/** The Cloudflare zone holding `domain` (itself or a parent), as setup.sh finds it. */
+export async function findCloudflareZone(token: string, domain: string, base = "https://api.cloudflare.com/client/v4"): Promise<{ id: string; name: string }> {
+  let name = domain;
+  while (name.includes(".")) {
+    const res = await fetch(`${base}/zones?name=${encodeURIComponent(name)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(res.status === 401 || res.status === 400 || res.status === 403
+      ? "Cloudflare did not accept the token. It may be copied incompletely, or be the Global API Key."
+      : `Cloudflare answered ${res.status}.`);
+    const json = (await res.json().catch(() => ({}))) as { result?: { id: string; name: string }[] };
+    const zone = json.result?.find((z) => z.name === name);
+    if (zone && /^[0-9a-f]{32}$/.test(zone.id)) return zone;
+    name = name.slice(name.indexOf(".") + 1);
+  }
+  throw new Error(`The token cannot see a zone for ${domain}. It may be for another domain; or type the Zone ID yourself.`);
 }

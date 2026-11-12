@@ -64,8 +64,64 @@ docker compose up -d --build
 ```
 
 Caddy gets certificates for `api.` and `app.` by itself; point their DNS records (and the
-apex, if you use it) at this host first. The first person to sign up with an address in
-`ADMIN_EMAILS` is an admin.
+apex, if you use it) at this host first. The first account made in the dashboard is
+the super admin (see below).
+
+### Admins, plans and settings
+
+- **The first account made is the super admin.** It may do everything, and is the only
+  one who makes other accounts admins and chooses what each admin may do (Admin > People >
+  a person > Role and permissions): see people, manage people, see or manage every
+  station, names, plans, settings, logs. Only the super admin acts on another admin's
+  account, and it can hand its role to an admin. `ADMIN_EMAILS` (optional) still makes
+  admins with every permission at sign-up. On an existing platform, the first migration
+  after this change makes its first admin (or else its first account) the super admin.
+- **Plans** (Admin > Plans) set how many stations a person may have; one is the default.
+  On a person's page an admin picks their plan or sets their own limit, which wins.
+  Without plans, `SUBDOMAIN_LIMIT` applies.
+- **People and stations**: admins add people (they get an email to choose a password),
+  confirm emails, send reset links, turn off a lost second factor, suspend, delete; create
+  a station for someone and move a station to another owner (its access code is replaced).
+- **Settings** (Admin > Settings): the Cloudflare token and zone, the SMTP address and
+  sender, the Let's Encrypt email, staging or production, and the weekly certificate
+  limit, without editing `.env` or restarting. Saved values win over `.env`, are stored
+  encrypted (key from `SESSION_SECRET`), are never shown again, and reach every process
+  within seconds. Changing them needs the `settings.manage` permission, two-step sign-in,
+  and sudo mode (below). The database, `SESSION_SECRET`, the domain, ports, proxies and
+  TURN's secrets stay in `.env`.
+
+### Payments (optional, off by default)
+
+Admin > Payments lets station owners buy plans with **Stripe**, **Paystack** or
+**Flutterwave**. Nothing depends on it: with payments off, admins assign plans by hand.
+
+1. Give at least one plan a price, currency and period (Admin > Plans > a plan).
+2. Choose the provider, paste its secret key (and, for Stripe, the webhook signing
+   secret; for Flutterwave, the secret hash), and press **Test connection**. Each provider
+   keeps its own keys, encrypted, so you can switch between them. Test keys take test
+   payments, live keys real ones; the page says which is in use.
+3. Add the webhook address shown there (`https://api.ROOT_DOMAIN/v1/billing/webhook/<provider>`)
+   in the provider's dashboard.
+4. Turn payments on. Owners then see **Billing**, pick a plan, pay on the provider's own
+   checkout page (card details never reach this platform) and come back.
+
+A payment counts only when the provider's API confirms it, for the exact amount and
+currency; webhooks are signature-checked, handled once each, and only trigger that check.
+The worker asks again about pending payments every 10 minutes. Each payment covers one
+month or year (renewing early adds to the time left); owners get an email 3 days before
+it ends, and afterwards they are on the default plan again (their stations stay).
+
+### Security
+
+- Admins must use two-step sign-in; the admin console stays closed until it is on.
+- **Sudo mode**: settings, payment keys, roles, handing over the super admin role,
+  turning off someone's second factor and deleting people need the password (and code)
+  confirmed within the last 10 minutes.
+- Sessions: `__Host-` cookies over HTTPS; 2 hours idle for admins, 12 for owners, 7 days at
+  most; every account sees its signed-in devices and can end them.
+- Email notices on password changes, two-step sign-in changes and role changes.
+- Strict CSP, no inline script, HSTS, `X-Frame-Options: DENY`, COOP/CORP, rate limits on
+  sign-in, sudo, two-step codes, emails and checkouts; every change in the audit log.
 
 **TURN host** (its own machine: it is bandwidth-heavy and needs a public address):
 

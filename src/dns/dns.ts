@@ -42,6 +42,11 @@ export class DnsManager {
     return this.provider.name;
   }
 
+  /** A new provider (its settings changed in the dashboard); records already made stay. */
+  setProvider(provider: DnsProvider) {
+    this.provider = provider;
+  }
+
   /** The provider's own setup check; null when it has none (memory, tests). */
   async check(): Promise<DnsCheckStep[] | null> {
     return this.provider.check ? this.provider.check(this.rootDomain) : null;
