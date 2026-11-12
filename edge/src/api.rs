@@ -47,6 +47,28 @@ impl Api {
         reply.into_json::<Value>().map_err(|e| format!("the API's answer was not understood: {e}"))
     }
 
+    /// The ports the platform says the edge serves: (UDP for stations, TCP for presenters).
+    pub fn config(&self) -> Result<(u16, Vec<u16>), String> {
+        let reply = match self
+            .agent
+            .get(&format!("{}/internal/edge/config", self.base))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .call()
+        {
+            Ok(r) => r,
+            Err(ureq::Error::Status(404, _)) => return Err("the platform's API is older than this edge: update the platform".into()),
+            Err(ureq::Error::Status(401, _)) => return Err("the platform refused EDGE_TOKEN".into()),
+            Err(e) => return Err(format!("the API did not answer: {}", short(&e))),
+        };
+        let v: Value = reply.into_json().map_err(|e| e.to_string())?;
+        let quic = v["quic_port"].as_u64().filter(|p| (1..=65535).contains(p)).ok_or("the API's answer had no quic_port")? as u16;
+        let ports: Vec<u16> = v["ports"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|p| p.as_u64()).filter(|p| (1..=65535).contains(p)).map(|p| p as u16).collect())
+            .unwrap_or_default();
+        Ok((quic, ports))
+    }
+
     /// The edge's certificate; None while it is not issued yet.
     pub fn cert(&self) -> Result<Option<Cert>, String> {
         let got = self

@@ -18,6 +18,7 @@ import { audit } from "../lib/audit.js";
 import { forget, hit, LIMITS } from "../lib/limits.js";
 import type { Mailer } from "../lib/mail.js";
 import { checkName, fqdnOf, normaliseLabel } from "../lib/names.js";
+import { presenterPort } from "../api/studio.js";
 import { allowance, stationWord } from "../lib/plans.js";
 import { ALL_PERMISSIONS, can, isStaff } from "../lib/rbac.js";
 import { decrypt, dummyHash, encrypt, hashSecret, newToken, newTotpSecret, tokenHash, totpUri, verifySecret, verifyTotp } from "../lib/secrets.js";
@@ -536,7 +537,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
   async function ownStation(req: FastifyRequest, reply: FastifyReply, s: Session) {
     const id = Number((req.params as { id: string }).id);
     const row = Number.isSafeInteger(id) ? (await d.db.query(
-      `SELECT s.id, s.label, s.status, s.user_id, s.created_at, st.id AS studio_id, st.last_ip, st.last_port, st.last_seen_at, st.app_version, u.email AS owner
+      `SELECT s.id, s.label, s.status, s.user_id, s.created_at, st.id AS studio_id, st.last_ip, st.last_port, st.via, st.last_seen_at, st.app_version, u.email AS owner
          FROM subdomains s JOIN studios st ON st.subdomain_id = s.id JOIN users u ON u.id = s.user_id WHERE s.id = $1`, [id])).rows[0] : undefined;
     const staff = can(s.user, req.method === "GET" ? "stations.view" : "stations.manage");
     if (!row || (row.user_id !== s.user.id && !staff)) {
@@ -554,7 +555,9 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const cert = (await d.db.query("SELECT status, expires_at, error FROM certificates WHERE subdomain_id = $1 AND status IN ('pending', 'issued', 'failed') ORDER BY created_at DESC LIMIT 1", [st.id])).rows[0];
     const usage = (await d.db.query("SELECT coalesce(sum(bytes_relayed), 0)::bigint AS b, coalesce(sum(sessions), 0)::int AS n FROM turn_usage WHERE studio_id = $1 AND day >= date_trunc('month', current_date)", [st.studio_id])).rows[0];
     const fqdn = fqdnOf(st.label, d.config.rootDomain);
-    const url = `https://${fqdn}${st.last_port && st.last_port !== 443 ? `:${st.last_port}` : ""}`;
+    // Through the edge, presenters use a port the edge serves, not the station's own.
+    const port = presenterPort(d.config, st.via, st.last_port);
+    const url = `https://${fqdn}${port !== 443 ? `:${port}` : ""}`;
     const mine = st.user_id === s.user.id;
     const manage = can(s.user, "stations.manage");
     const fromAdmin = !mine && can(s.user, "stations.view");
@@ -566,6 +569,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       <div class="split"><div>
       ${panel({ title: "Overview" }, facts([
         ["Address for presenters", html`<div class="copyline"><code>${url}</code><button type="button" class="sm" data-copy="${url}">${icon("copy", 14)} Copy</button></div>`],
+        ["Reached", st.via === "tunnel" && d.config.edgeIp ? "Through the edge (no open port at the station)" : "Directly"],
         ["Last address", st.last_ip ? `${st.last_ip}${st.last_port ? ` port ${st.last_port}` : ""}` : "—"],
         ["Last seen", when(st.last_seen_at)],
         ["Nova version", st.app_version ?? "—"],

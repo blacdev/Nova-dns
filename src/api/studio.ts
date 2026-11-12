@@ -86,6 +86,25 @@ export function tunnelOffer(d: Deps): { tunnel?: { edge: string; server_name: st
   return { tunnel: { edge: d.config.edgeHost, server_name: `edge.${d.config.rootDomain}`, ports: d.config.edgePorts } };
 }
 
+/** The UDP port stations dial the edge on (EDGE_HOST's port; 443 when it names none). */
+export function edgeQuicPort(d: Deps): number {
+  const port = Number(/:(\d+)$/.exec(d.config.edgeHost)?.[1] ?? 443);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : 443;
+}
+
+/**
+ * The port in a station's address for presenters: its own server port when reached
+ * directly; through the edge, a port the edge serves (the station's own if the edge
+ * serves it, else 443, else the first). Nova works it out the same way
+ * (nova/remote/studio.py, snapshot).
+ */
+export function presenterPort(config: { edgeIp: string; edgePorts: number[] }, via: string | null, ownPort: number | null): number {
+  const own = ownPort ?? 25433;
+  if (via !== "tunnel" || !config.edgeIp) return own;
+  const served = config.edgePorts.length ? config.edgePorts : [443, 25433];
+  return served.includes(own) ? own : served.includes(443) ? 443 : served[0];
+}
+
 // ---------------------------------------------------------------- who is calling
 
 export async function studioFor(d: Deps, authorization: string | undefined): Promise<Studio> {
@@ -120,7 +139,10 @@ export async function ddnsUpdate(d: Deps, s: Studio, body: Record<string, unknow
   if (set.changed) d.metrics.add("dns_updates_total");
   await d.db.query("UPDATE studios SET last_ip = $2, last_port = $3, last_seen_at = now(), online = true, via = $4 WHERE id = $1",
     [s.studioId, ip, port, via]);
-  return { ip, changed: set.changed, dns_status: set.ok ? "propagated" : "pending", fqdn: s.fqdn, via };
+  // The edge's offer, now, on every heartbeat: a station learns a changed edge address or
+  // ports within minutes, without signing in again. null when the platform runs no edge.
+  return { ip, changed: set.changed, dns_status: set.ok ? "propagated" : "pending", fqdn: s.fqdn, via,
+    tunnel: tunnelOffer(d).tunnel ?? null };
 }
 
 // ---------------------------------------------------------------- the tunnel's edge

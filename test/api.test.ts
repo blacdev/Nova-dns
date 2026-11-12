@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import acme from "acme-client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApi } from "../src/api/app.js";
+import { presenterPort } from "../src/api/studio.js";
 import type { Db } from "../src/db/db.js";
 import * as subs from "../src/lib/subdomains.js";
 import { freshDb, person, platform } from "./helpers.js";
@@ -76,7 +77,7 @@ describe("3.2 DNS update", () => {
     const s = await registered("ddnsfm");
     const calls = p.provider.calls;
     const first = await post("/v1/ddns/update", { ip_override: null, port: 25433 }, s.studio_token, "198.51.100.7");
-    expect(first.json()).toEqual({ ip: "198.51.100.7", changed: true, dns_status: "propagated", fqdn: "ddnsfm.example.test", via: "direct" });
+    expect(first.json()).toEqual({ ip: "198.51.100.7", changed: true, dns_status: "propagated", fqdn: "ddnsfm.example.test", via: "direct", tunnel: null });
     expect(p.provider.get("ddnsfm.example.test", "A")).toEqual(["198.51.100.7"]);
     const again = await post("/v1/ddns/update", { port: 25433 }, s.studio_token, "198.51.100.7");
     expect(again.json().changed).toBe(false);
@@ -322,6 +323,35 @@ describe("the tunnel's edge (Nova's docs/TUNNEL.md)", () => {
     expect((await ask("not-a-token")).json()).toMatchObject({ ok: false, code: "invalid_token" });
     await subs.setSuspended(ctx(), { id: s.owner, ip: null, admin: true }, s.id, true);
     expect((await ask(token)).json()).toMatchObject({ ok: false, code: "suspended" });
+  });
+
+  it("every heartbeat carries the edge's offer as it is now, so a changed port reaches stations", async () => {
+    const s = await station("beatfm");
+    const token = (await on("/v1/studio/register", { hostname: "beatfm", access_code: s.accessCode }, undefined, "192.0.2.94")).json().studio_token;
+    const beat = await on("/v1/ddns/update", { port: 25433, via: "tunnel" }, token);
+    expect(beat.json().tunnel).toEqual({ edge: "edge.example.test:443", server_name: "edge.example.test", ports: [443, 25433] });
+    // The platform's ports changed (EDGE_PORTS): the next heartbeat says so.
+    const moved = buildApi(platform(db, { edgeIp: "203.0.113.50", edgeHost: "edge.example.test:4433", edgePorts: [25434] }).deps);
+    const again = await moved.inject({ method: "POST", url: "/v1/ddns/update", payload: { port: 25433, via: "tunnel" }, headers: { authorization: `Bearer ${token}` } });
+    expect(again.json().tunnel).toEqual({ edge: "edge.example.test:4433", server_name: "edge.example.test", ports: [25434] });
+    await moved.close();
+  });
+
+  it("tells the edge which ports to listen on: the platform is the one place they are set", async () => {
+    const moved = buildApi(platform(db, { edgeIp: "203.0.113.50", edgeHost: "edge.example.test:4433", edgePorts: [25434] }).deps);
+    const ask = (token: string) => moved.inject({ method: "GET", url: "/internal/edge/config", headers: { authorization: `Bearer ${token}` } });
+    expect((await ask("usage-token")).statusCode).toBe(401);
+    expect((await ask("edge-token")).json()).toEqual({ quic_port: 4433, ports: [25434], server_name: "edge.example.test" });
+    await moved.close();
+  });
+
+  it("the address for presenters names a port the edge serves while the station comes in through it", () => {
+    const cfg = { edgeIp: "203.0.113.50", edgePorts: [25434] };
+    expect(presenterPort(cfg, "tunnel", 25433)).toBe(25434);
+    expect(presenterPort(cfg, "direct", 25433)).toBe(25433);
+    expect(presenterPort({ edgeIp: "203.0.113.50", edgePorts: [443, 25433] }, "tunnel", 25433)).toBe(25433);
+    expect(presenterPort({ edgeIp: "203.0.113.50", edgePorts: [443, 25433] }, "tunnel", 26000)).toBe(443);
+    expect(presenterPort({ edgeIp: "", edgePorts: [25434] }, "tunnel", 25433)).toBe(25433); // no edge any more
   });
 
   it("hands the edge its certificate with the edge's token only", async () => {
