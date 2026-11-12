@@ -240,6 +240,21 @@ Choices made where the spec left room:
 
 ## What was verified, and how
 
+**The edge (2026-11-12, Linux, one computer):** `cd edge && cargo test` (9 tests: a
+presenter reaches their station on both ports with their own address, forty at once each
+get their own bytes back, plain http and unknown names are closed, the platform decides
+who signs in and the API out of reach gives `try_later`, a renamed station is let go but
+not for an API hiccup, a newer sign-in takes over, the per-address limit, the certificate
+from the API). Then end to end with the real API (PostgreSQL 16, `EDGE_IP` set), the real
+edge and a real Nova engine with its `nova-tunnel` (blacdev/Nova 0.2.27): Nova registered
+and was offered the edge, its name was pointed at the edge (`studios.via = tunnel`), the
+edge checked its token with the API, and an HTTPS request for `kfm.example.test` through
+the edge was answered by Nova itself (its install id); suspending the station in the
+database made the edge let it go at its next re-check, refuse it when it dialled back, and
+Nova said "This station is suspended". Not verified: the Docker image (no Docker daemon
+here; `cargo build --release --locked`, which it runs, succeeds), a real certificate from
+Let's Encrypt for edge.ROOT_DOMAIN, real networks.
+
 On a Linux machine with a real PostgreSQL 16, Pebble (Let's Encrypt's test CA) with its
 challenge DNS server, coturn 4.6.1, and a real Nova engine:
 
