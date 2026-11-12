@@ -21,6 +21,13 @@ export interface Ctx {
   rootDomain: string;
   /** SUBDOMAIN_LIMIT: the limit when no plan applies (see plans.ts). */
   limit: number;
+  /** The tunnel's edge (EDGE_IP), when it runs: a station reached through it is pointed there. */
+  edgeIp?: string;
+}
+
+/** Where a station's name should point: the edge for one that comes in through it, else the station. */
+function target(c: Ctx, s: { last_ip: string | null; via?: string | null }): string | null {
+  return s.via === "tunnel" && c.edgeIp ? c.edgeIp : s.last_ip;
 }
 
 export interface Actor {
@@ -83,11 +90,12 @@ interface SubRow {
   status: string;
   studio_id: string;
   last_ip: string | null;
+  via: string;
 }
 
 async function load(q: Queryable, id: number, lock = false): Promise<SubRow> {
   const r = await q.query<SubRow>(
-    `SELECT s.id, s.label, s.user_id, s.status, st.id AS studio_id, st.last_ip
+    `SELECT s.id, s.label, s.user_id, s.status, st.id AS studio_id, st.last_ip, st.via
        FROM subdomains s JOIN studios st ON st.subdomain_id = s.id WHERE s.id = $1 ${lock ? "FOR UPDATE OF s" : ""}`, [id]);
   if (!r.rows[0]) throw new SubdomainError("No such subdomain.");
   return r.rows[0];
@@ -119,7 +127,8 @@ export async function rename(c: Ctx, actor: Actor, id: number, label: string): P
     throw e;
   }
   await c.dns.removeName(fqdnOf(before.label, c.rootDomain)).catch(() => undefined);
-  if (before.last_ip && before.status === "active") await c.dns.pointAt(fqdnOf(label, c.rootDomain), before.last_ip).catch(() => undefined);
+  const to = target(c, before);
+  if (to && before.status === "active") await c.dns.pointAt(fqdnOf(label, c.rootDomain), to).catch(() => undefined);
   return { from: before.label, to: label };
 }
 
@@ -165,7 +174,7 @@ export async function setSuspended(c: Ctx, actor: Actor, id: number, suspended: 
   });
   const fqdn = fqdnOf(s.label, c.rootDomain);
   if (suspended) await c.dns.removeName(fqdn);
-  else if (s.last_ip) await c.dns.pointAt(fqdn, s.last_ip);
+  else if (target(c, s)) await c.dns.pointAt(fqdn, target(c, s)!);
 }
 
 /** Suspend or restore a person: every one of their stations follows. */
@@ -175,13 +184,13 @@ export async function setUserSuspended(c: Ctx, actor: Actor, userId: number, sus
     if (!u.rows[0]) throw new SubdomainError("No such user.");
     if (suspended) await tx.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
     await audit(tx, { actor: actor.id, action: suspended ? "user.suspend" : "user.unsuspend", target: u.rows[0].email, ip: actor.ip });
-    return (await tx.query<{ label: string; status: string; last_ip: string | null }>(
-      "SELECT s.label, s.status, st.last_ip FROM subdomains s JOIN studios st ON st.subdomain_id = s.id WHERE s.user_id = $1", [userId])).rows;
+    return (await tx.query<{ label: string; status: string; last_ip: string | null; via: string }>(
+      "SELECT s.label, s.status, st.last_ip, st.via FROM subdomains s JOIN studios st ON st.subdomain_id = s.id WHERE s.user_id = $1", [userId])).rows;
   });
   for (const s of subs) {
     const fqdn = fqdnOf(s.label, c.rootDomain);
     if (suspended) await c.dns.removeName(fqdn).catch(() => undefined);
-    else if (s.status === "active" && s.last_ip) await c.dns.pointAt(fqdn, s.last_ip).catch(() => undefined);
+    else if (s.status === "active" && target(c, s)) await c.dns.pointAt(fqdn, target(c, s)!).catch(() => undefined);
   }
 }
 

@@ -74,7 +74,15 @@ export async function register(d: Deps, body: Record<string, unknown>, ip: strin
   await d.db.query("UPDATE studios SET install_id = $2, app_version = $3 WHERE id = $1",
     [row.studio_id, String(body.install_id ?? "").slice(0, 100) || null, String(body.app_version ?? "").slice(0, 50) || null]);
   d.metrics.add("studio_registrations_total");
-  return { studio_token: token, token_expires_at: stamp(expires), fqdn: fqdnOf(row.label, d.config.rootDomain), studio_id: row.studio_id };
+  return { studio_token: token, token_expires_at: stamp(expires), fqdn: fqdnOf(row.label, d.config.rootDomain), studio_id: row.studio_id,
+    ...tunnelOffer(d) };
+}
+
+/** The tunnel's edge, offered to every station while the platform runs one (Nova's
+ *  docs/TUNNEL.md): where to dial (QUIC) and the name on the edge's certificate. */
+export function tunnelOffer(d: Deps): { tunnel?: { edge: string; server_name: string } } {
+  if (!d.config.edgeIp) return {};
+  return { tunnel: { edge: d.config.edgeHost, server_name: `edge.${d.config.rootDomain}` } };
 }
 
 // ---------------------------------------------------------------- who is calling
@@ -102,10 +110,38 @@ export async function ddnsUpdate(d: Deps, s: Studio, body: Record<string, unknow
   }
   const port = Number(body.port ?? 25433);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw badRequest("port must be 1-65535");
-  const set = await d.dns.pointAt(s.fqdn, ip);
+  // "tunnel": the station is reached through the edge, so its name points there. The
+  // station's own address is still kept (last_ip): the probe tests the direct way with it.
+  const asked = body.via ?? "direct";
+  if (asked !== "direct" && asked !== "tunnel") throw badRequest('via must be "direct" or "tunnel"');
+  const via = asked === "tunnel" && d.config.edgeIp ? "tunnel" : "direct";
+  const set = await d.dns.pointAt(s.fqdn, via === "tunnel" ? d.config.edgeIp : ip);
   if (set.changed) d.metrics.add("dns_updates_total");
-  await d.db.query("UPDATE studios SET last_ip = $2, last_port = $3, last_seen_at = now(), online = true WHERE id = $1", [s.studioId, ip, port]);
-  return { ip, changed: set.changed, dns_status: set.ok ? "propagated" : "pending", fqdn: s.fqdn };
+  await d.db.query("UPDATE studios SET last_ip = $2, last_port = $3, last_seen_at = now(), online = true, via = $4 WHERE id = $1",
+    [s.studioId, ip, port, via]);
+  return { ip, changed: set.changed, dns_status: set.ok ? "propagated" : "pending", fqdn: s.fqdn, via };
+}
+
+// ---------------------------------------------------------------- the tunnel's edge
+
+/**
+ * The edge asks whether a station's token is good when the station dials in, and again
+ * every few minutes while it stays (a renamed, suspended or deleted station is let go).
+ * The same checks as every studio call (`studioFor`); the answer is the line the edge
+ * sends the station (Nova's docs/TUNNEL.md).
+ */
+export async function edgeAuth(d: Deps, body: Record<string, unknown>) {
+  const token = String(body.token ?? "");
+  try {
+    const s = await studioFor(d, `Bearer ${token}`);
+    return { ok: true, fqdn: s.fqdn, studio_id: s.studioId };
+  } catch (e) {
+    if (e instanceof ApiError && e.status < 500) {
+      // An unknown or expired token: the station signs in to the platform again and dials back.
+      return { ok: false, code: e.code === "suspended" ? "suspended" : "invalid_token", message: e.message };
+    }
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------- 3.3 certificates

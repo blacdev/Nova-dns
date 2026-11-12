@@ -28,6 +28,7 @@ export function testConfig(over: Partial<Config> = {}): Config {
     rootDomain: "example.test", databaseUrl: "", dnsProvider: "memory", challTestSrvUrl: "",
     cloudflareApiToken: "", cloudflareZoneId: "", acmeDirectoryUrl: "", acmeEmail: "ops@example.test", acmeCaBundle: "",
     turnSharedSecret: "turn-secret", turnSharedSecretPrevious: "", turnHost: "turn.example.test", turnUsageToken: "usage-token",
+    edgeIp: "", edgeHost: "edge.example.test:443", edgeToken: "edge-token",
     sessionSecret: "session-secret", smtpUrl: "", mailFrom: "Nova <no-reply@example.test>", trustedProxies: ["127.0.0.1"],
     apiPort: 0, dashboardPort: 0, dashboardUrl: "http://app.example.test", subdomainLimit: 1, certWeeklyLimit: 50,
     adminEmails: [], allowPrivateProbe: true, dnsCheckResolver: "",

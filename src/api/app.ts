@@ -3,7 +3,7 @@
  * health and metrics. JSON only; every error is `{"error": {"code", "message"}}`.
  */
 
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { BillingError, handleWebhook } from "../billing/billing.js";
 import { BadSignature } from "../billing/gateways.js";
 import { decrypt, sameString } from "../lib/secrets.js";
@@ -58,13 +58,23 @@ export function buildApi(d: Deps): FastifyInstance {
     return studio.recordTurnUsage(d, body(req));
   });
 
-  // The coturn host fetches turn.<root>'s certificate (issued by the worker).
-  app.get("/internal/turn-cert", async (req, reply) => {
+  // The coturn host fetches turn.<root>'s certificate, the tunnel's edge edge.<root>'s
+  // (both issued by the worker), each with its own token.
+  const platformCert = async (name: "turn" | "edge", token: string, req: FastifyRequest, reply: FastifyReply) => {
     const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
-    if (!d.config.turnUsageToken || !sameString(given, d.config.turnUsageToken)) throw unauthorized("Not allowed.", "forbidden");
-    const row = (await d.db.query<{ key_enc: string; cert_pem: string | null; expires_at: Date | null }>("SELECT key_enc, cert_pem, expires_at FROM platform_certs WHERE name = 'turn'")).rows[0];
+    if (!token || !sameString(given, token)) throw unauthorized("Not allowed.", "forbidden");
+    const row = (await d.db.query<{ key_enc: string; cert_pem: string | null; expires_at: Date | null }>("SELECT key_enc, cert_pem, expires_at FROM platform_certs WHERE name = $1", [name])).rows[0];
     if (!row?.cert_pem) return reply.status(404).send({ error: { code: "not_ready", message: "Not issued yet." } });
     return { cert_pem: row.cert_pem, key_pem: decrypt(d.config.sessionSecret, row.key_enc), expires_at: row.expires_at };
+  };
+  app.get("/internal/turn-cert", async (req, reply) => platformCert("turn", d.config.turnUsageToken, req, reply));
+  app.get("/internal/edge-cert", async (req, reply) => platformCert("edge", d.config.edgeToken, req, reply));
+
+  // The tunnel's edge checks a station's token (Nova's docs/TUNNEL.md).
+  app.post("/internal/edge/auth", async (req) => {
+    const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
+    if (!d.config.edgeToken || !sameString(given, d.config.edgeToken)) throw unauthorized("Not allowed.", "forbidden");
+    return studio.edgeAuth(d, body(req));
   });
 
   // Payment providers' webhooks. The body is kept exactly as sent: the signature covers those bytes.

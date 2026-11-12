@@ -19,7 +19,7 @@ import { Resolver } from "node:dns/promises";
 import * as x509 from "@peculiar/x509";
 import acme from "acme-client";
 import type { Db } from "../db/db.js";
-import type { DnsManager } from "../dns/dns.js";
+import type { DnsManager, PlatformLabel } from "../dns/dns.js";
 import { opsEvent } from "../lib/audit.js";
 import { decrypt, encrypt } from "../lib/secrets.js";
 import type { Config } from "../config.js";
@@ -166,7 +166,7 @@ export class Issuer {
   // ---------------------------------------------------------------- the platform's own (turn.<root>)
 
   /** Keep a certificate for turn.<root> (coturn's TLS), renewed with 30 days left. */
-  async ensurePlatformCert(label: "turn" = "turn"): Promise<boolean> {
+  async ensurePlatformCert(label: PlatformLabel = "turn"): Promise<boolean> {
     const fqdn = `${label}.${this.d.config.rootDomain}`;
     const row = (await this.d.db.query<{ key_enc: string; expires_at: Date | null }>("SELECT key_enc, expires_at FROM platform_certs WHERE name = $1", [label])).rows[0];
     if (row?.expires_at && row.expires_at.getTime() - Date.now() > RENEW_DAYS * 86400_000) return false;
