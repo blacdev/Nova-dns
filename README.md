@@ -147,8 +147,9 @@ itself when the platform's probe cannot reach a station directly.
    the edge machine's public address. It makes `EDGE_TOKEN`, adds `edge.ROOT_DOMAIN` at
    Cloudflare (when it adds the others), warns if a station already holds the name `edge`,
    and prints what the edge machine needs.
-2. On the edge machine: `./setup.sh edge`. It asks for the domain, the API and that token,
-   tests the token with the platform before starting anything, checks `edge.ROOT_DOMAIN`
+2. On the edge machine: `./setup.sh edge`. It asks for the domain and the API, and for the
+   token only when it is not already in `deploy/edge/.env` or `.env` (or the platform
+   refuses the saved one); it tests the token with the platform before starting anything, checks `edge.ROOT_DOMAIN`
    points at this machine, starts the edge and says which ports to open: UDP 443
    (stations), TCP 443 and 25433 (presenters).
 3. `./setup.sh check` on the platform includes the edge: its DNS record, its certificate,

@@ -594,8 +594,19 @@ setup_edge() {
   ask_domain ROOT_DOMAIN "Domain (as on the platform)" "$(old ROOT_DOMAIN)"
   ask_required EDGE_API_BASE "The platform's API" "$(old EDGE_API_BASE "$(old API_BASE "https://api.$ROOT_DOMAIN")")"
   EDGE_API_BASE=${EDGE_API_BASE%/}
-  note "EDGE_TOKEN comes from the platform's .env (./setup.sh platform printed it)."
-  ask_secret EDGE_TOKEN "EDGE_TOKEN" "$(old EDGE_TOKEN)"
+  # The token is read, not asked for, when it is already here: this machine's own earlier
+  # answer (deploy/edge/.env), or the platform's .env when both run from this checkout.
+  local from=""
+  if grep -qs '^EDGE_TOKEN=..*' deploy/edge/.env; then from=deploy/edge/.env
+  elif grep -qs '^EDGE_TOKEN=..*' .env; then from=.env
+  fi
+  if [ -n "$from" ]; then
+    EDGE_TOKEN=$(old EDGE_TOKEN)
+    note "Using the EDGE_TOKEN saved in $from."
+  else
+    note "EDGE_TOKEN comes from the platform's .env (./setup.sh platform printed it)."
+    ask_secret EDGE_TOKEN "EDGE_TOKEN"
+  fi
   EDGE_QUIC=$(old EDGE_QUIC "0.0.0.0:443"); EDGE_PUBLIC=$(old EDGE_PUBLIC "0.0.0.0:443,0.0.0.0:25433")
 
   bold "Testing it with the platform"
@@ -603,12 +614,19 @@ setup_edge() {
     warn "curl is not installed, so the token and the API were not tested."
   else
     local code
-    # Asking about a station that does not exist: 200 means the token is right.
-    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$EDGE_API_BASE/internal/edge/auth" \
-      -H "Authorization: Bearer $EDGE_TOKEN" -H 'Content-Type: application/json' -d '{"token":"setup-check"}' 2>/dev/null || true)
+    while :; do
+      # Asking about a station that does not exist: 200 means the token is right.
+      code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$EDGE_API_BASE/internal/edge/auth" \
+        -H "Authorization: Bearer $EDGE_TOKEN" -H 'Content-Type: application/json' -d '{"token":"setup-check"}' 2>/dev/null || true)
+      [ "$code" = 401 ] || break
+      # Refused (a saved token that has since changed on the platform, or a mistyped one): ask.
+      warn "The platform refused this EDGE_TOKEN. Copy EDGE_TOKEN from the platform's .env again;"
+      warn "if it is right there, start the platform again (./setup.sh platform) so it reads it."
+      [ "$INPUT_ENDED" = 1 ] && fail "No other EDGE_TOKEN to try."
+      ask_secret EDGE_TOKEN "EDGE_TOKEN"
+    done
     case "$code" in
       200) good "The platform's API accepts this EDGE_TOKEN." ;;
-      401) fail "The platform refused this EDGE_TOKEN: copy it again from the platform's .env (EDGE_TOKEN), and make sure the platform was started again after setting it." ;;
       404) fail "The platform's API does not know the edge yet: update the platform (git pull, ./setup.sh platform) and try again." ;;
       000|"") fail "Could not reach $EDGE_API_BASE from here. Check the address and that this machine can reach the internet." ;;
       *) fail "The platform's API answered $code. Check its logs: docker compose logs api" ;;
