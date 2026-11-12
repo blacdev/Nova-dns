@@ -132,6 +132,26 @@ need_docker() {
 
 resolves_to() { getent ahosts "$1" 2>/dev/null | awk 'NR==1 {print $1}'; }
 is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$1" == *:*:* && "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
+ask_port() { # ask_port VAR "question" default: one port number
+  local var=$1
+  while :; do
+    ask_required "$@"
+    [[ "${!var}" =~ ^[0-9]+$ ]] && [ "${!var}" -ge 1 ] && [ "${!var}" -le 65535 ] && return 0
+    [ "$INPUT_ENDED" = 1 ] && fail "\"${!var}\" is not a port."
+    warn "A port is a number from 1 to 65535."
+  done
+}
+ask_ports() { # ask_ports VAR "question" default: ports, comma separated (spaces dropped)
+  local var=$1 v p ok
+  while :; do
+    ask_required "$@"
+    v=${!var//[[:space:]]/}; ok=1
+    for p in ${v//,/ }; do { [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]; } || ok=0; done
+    if [ "$ok" = 1 ] && [ -n "$v" ]; then printf -v "$var" '%s' "$v"; return 0; fi
+    [ "$INPUT_ENDED" = 1 ] && fail "\"${!var}\" are not ports."
+    warn "Give ports like: 25433 or 443,25433"
+  done
+}
 ask_ip() { # ask_ip VAR "question" default: an IPv4 or IPv6 address
   local var=$1
   while :; do
@@ -362,16 +382,29 @@ setup_platform() {
   note "Stations behind a router that forwards nothing, or an internet provider that shares one"
   note "address among many customers, cannot be reached directly. With an edge they dial out to"
   note "it and presenters reach them through it (Nova does this by itself; TLS still ends in Nova)."
-  note "It runs on its own machine with a public address: it needs ports 443, which this machine's"
-  note "Caddy or proxy already uses. Set it up there afterwards with: ./setup.sh edge"
+  note "Set it up on its machine afterwards with: ./setup.sh edge"
   local was_edge=no
   [ -n "$(old EDGE_IP)" ] && was_edge=yes
   choose EDGE "Run an edge" "$was_edge" yes no
-  EDGE_IP=""; EDGE_HOST=""
+  EDGE_IP=""; EDGE_HOST=""; EDGE_PORTS=$(old EDGE_PORTS)
   EDGE_TOKEN=$(old EDGE_TOKEN)
   if [ "$EDGE" = yes ]; then
-    ask_ip EDGE_IP "The edge machine's public IP address" "$(old EDGE_IP)"
-    EDGE_HOST=$(old EDGE_HOST "edge.$ROOT_DOMAIN:443")
+    note "Behind your own router this is the router's public address (the same one api.$ROOT_DOMAIN uses)."
+    ask_ip EDGE_IP "The edge's public IP address" "$(old EDGE_IP)"
+    # Its ports: TCP 443 is the proxy's (Nginx Proxy Manager, or Caddy) wherever they share
+    # an address, and the edge must not sit behind it: forwarded straight to the edge machine,
+    # or every presenter would look like the proxy and share one connection limit.
+    local udp_def=443 tcp_def="443,25433" was_udp
+    was_udp=$(old EDGE_HOST); was_udp=${was_udp##*:}
+    [ "$FRONT" = proxy ] && tcp_def=25433
+    note "Ports forwarded on the router STRAIGHT to the edge machine (not through $([ "$FRONT" = proxy ] && echo "your proxy" || echo "Caddy")):"
+    note "  one UDP port for stations, and the TCP port(s) presenters use."
+    [ "$FRONT" = proxy ] && note "  TCP 443 is your proxy's, so presenters use 25433 (the port Nova's addresses carry)."
+    note "  A router forwards a port to one machine only: if 25433 already goes to a Nova station"
+    note "  on this network, give the edge another one (e.g. 25434); stations are told which."
+    ask_port EDGE_UDP "UDP port stations dial" "${was_udp:-$udp_def}"
+    ask_ports EDGE_PORTS "TCP port(s) for presenters, comma separated" "$(old EDGE_PORTS "$tcp_def")"
+    EDGE_HOST="edge.$ROOT_DOMAIN:$EDGE_UDP"
     EDGE_TOKEN=$(keep_or_new EDGE_TOKEN 32)
     note "Made (or kept) EDGE_TOKEN, which the edge uses to ask this platform about stations."
   else
@@ -390,12 +423,12 @@ setup_platform() {
     [ADMIN_EMAILS]=$ADMIN_EMAILS [SUBDOMAIN_LIMIT]=$(old SUBDOMAIN_LIMIT 1)
     [TRUSTED_PROXIES]=$TRUSTED_PROXIES [API_PORT]=$API_PORT [DASHBOARD_PORT]=$DASHBOARD_PORT
     [PROXY_IP]=${PROXY_IP:-}
-    [EDGE_IP]=$EDGE_IP [EDGE_HOST]=$EDGE_HOST [EDGE_TOKEN]=$EDGE_TOKEN
+    [EDGE_IP]=$EDGE_IP [EDGE_HOST]=$EDGE_HOST [EDGE_PORTS]=$EDGE_PORTS [EDGE_TOKEN]=$EDGE_TOKEN
   )
   ENV_ORDER=(ROOT_DOMAIN DASHBOARD_URL POSTGRES_PASSWORD DATABASE_URL DNS_PROVIDER CLOUDFLARE_API_TOKEN
     CLOUDFLARE_ZONE_ID ACME_DIRECTORY_URL ACME_EMAIL CERT_WEEKLY_LIMIT TURN_SHARED_SECRET
     TURN_SHARED_SECRET_PREVIOUS TURN_HOST TURN_USAGE_TOKEN API_BASE SESSION_SECRET SMTP_URL MAIL_FROM
-    ADMIN_EMAILS SUBDOMAIN_LIMIT TRUSTED_PROXIES API_PORT DASHBOARD_PORT PROXY_IP EDGE_IP EDGE_HOST EDGE_TOKEN)
+    ADMIN_EMAILS SUBDOMAIN_LIMIT TRUSTED_PROXIES API_PORT DASHBOARD_PORT PROXY_IP EDGE_IP EDGE_HOST EDGE_PORTS EDGE_TOKEN)
   if [ -f .env ] && [ -n "$(old POSTGRES_PASSWORD)" ] && [ "$(old POSTGRES_PASSWORD)" != "$POSTGRES_PASSWORD" ]; then
     warn "The database password changed; an existing database keeps its old one. Keep the old .env if it has data."
   fi
@@ -492,9 +525,11 @@ YAML
   note "  TURN_USAGE_TOKEN=$TURN_USAGE_TOKEN"
   note "  API_BASE=https://api.$ROOT_DOMAIN   TURN_HOST=turn.$ROOT_DOMAIN"
   if [ "$EDGE" = yes ]; then
-    note "On the edge machine ($EDGE_IP): ./setup.sh edge, with these values:"
+    note "On the edge machine: ./setup.sh edge, with these values:"
     note "  EDGE_API_BASE=https://api.$ROOT_DOMAIN"
     note "  EDGE_TOKEN=$EDGE_TOKEN"
+    note "  UDP port $EDGE_UDP for stations, TCP $EDGE_PORTS for presenters"
+    note "On the router, forward them straight to the edge machine (UDP $EDGE_UDP; TCP $EDGE_PORTS)."
     note "The worker issues edge.$ROOT_DOMAIN's certificate once its DNS record is in place."
   fi
   note "In Nova, put this in <Nova Data>/remote/config.json, then restart Nova:"
@@ -585,8 +620,7 @@ setup_edge() {
   bold "The tunnel's edge: stations that open no port on their router are reached through it"
   note "Stations dial out to it over QUIC; presenters' browsers connect to it and are passed on to"
   note "their station, still encrypted (it never sees a page, a sign-in or a voice)."
-  note "It needs its own public address and ports 443 (UDP and TCP) and 25433 (TCP): not a"
-  note "machine where Caddy or another web server already has 443."
+  note "It needs a UDP port for stations and a TCP port for presenters, forwarded straight to it."
   load_old .env
   load_old deploy/edge/.env
   need_docker
@@ -607,7 +641,25 @@ setup_edge() {
     note "EDGE_TOKEN comes from the platform's .env (./setup.sh platform printed it)."
     ask_secret EDGE_TOKEN "EDGE_TOKEN"
   fi
-  EDGE_QUIC=$(old EDGE_QUIC "0.0.0.0:443"); EDGE_PUBLIC=$(old EDGE_PUBLIC "0.0.0.0:443,0.0.0.0:25433")
+  # Its ports, as the platform's run chose them (.env) or this machine's earlier run; else asked.
+  local udp tcp p
+  if grep -qs '^EDGE_QUIC=..*' deploy/edge/.env; then
+    udp=$(old EDGE_QUIC); udp=${udp##*:}
+    tcp=$(old EDGE_PUBLIC); tcp=$(printf '%s' "$tcp" | tr ',' '\n' | sed 's/.*://' | paste -sd, -)
+    note "Ports as saved in deploy/edge/.env: UDP $udp for stations, TCP $tcp for presenters."
+  elif grep -qs '^EDGE_PORTS=..*' .env; then
+    udp=$(old EDGE_HOST); udp=${udp##*:}; tcp=$(old EDGE_PORTS)
+    note "Ports as the platform has them (.env): UDP $udp for stations, TCP $tcp for presenters."
+  else
+    local proxied
+    note "TCP 443 is often taken by a reverse proxy (Nginx Proxy Manager, Caddy) on the router."
+    choose proxied "Does a proxy on this network already have TCP 443" yes yes no
+    ask_port udp "UDP port stations dial (as on the platform: EDGE_HOST's port)" 443
+    ask_ports tcp "TCP port(s) for presenters (as on the platform: EDGE_PORTS)" "$([ "$proxied" = yes ] && echo 25433 || echo 443,25433)"
+  fi
+  EDGE_QUIC="0.0.0.0:$udp"
+  EDGE_PUBLIC=""
+  for p in ${tcp//,/ }; do EDGE_PUBLIC="${EDGE_PUBLIC:+$EDGE_PUBLIC,}0.0.0.0:$p"; done
 
   bold "Testing it with the platform"
   if ! command -v curl >/dev/null 2>&1; then
@@ -676,10 +728,10 @@ setup_edge() {
   fi
 
   bold "Next"
-  note "Open on this machine's firewall (and the cloud provider's):"
-  note "  UDP 443   stations dial in"
-  note "  TCP 443   presenters"
-  note "  TCP 25433 presenters, with the addresses stations already gave out"
+  note "Forward on the router STRAIGHT to this machine (not through a reverse proxy: behind one,"
+  note "every presenter would look like the proxy), and open on this machine's firewall:"
+  note "  UDP $udp   stations dial in"
+  note "  TCP ${tcp//,/, }   presenters"
   note "Stations need Nova 0.2.27 or later; they use the edge by themselves when they cannot"
   note "be reached directly (Settings > Remote access > How presenters reach this station)."
   note "Logs: docker compose -f deploy/edge/docker-compose.yml logs -f"
@@ -743,12 +795,14 @@ setup_check() {
       good "edge.$ROOT_DOMAIN -> $a"
     fi
     [ -n "$(old EDGE_TOKEN)" ] || bad "EDGE_TOKEN is empty: run ./setup.sh platform again."
+    local edge_tcp
+    edge_tcp=$(old EDGE_PORTS 443,25433); edge_tcp=${edge_tcp%%,*}
     if command -v timeout >/dev/null 2>&1; then
-      if timeout 5 bash -c "</dev/tcp/$(old EDGE_IP)/443" 2>/dev/null; then
-        # Only that something takes TCP 443 there; ./setup.sh edge on that machine checks the edge itself.
-        good "$(old EDGE_IP) takes connections on TCP 443 (the edge's own check: ./setup.sh edge there)."
+      if timeout 5 bash -c "</dev/tcp/$(old EDGE_IP)/$edge_tcp" 2>/dev/null; then
+        # Only that something takes that port there; ./setup.sh edge on that machine checks the edge itself.
+        good "$(old EDGE_IP) takes connections on TCP $edge_tcp (the edge's own check: ./setup.sh edge there)."
       else
-        bad "Nothing answers on $(old EDGE_IP) TCP 443: is the edge running (./setup.sh edge there) and the port open?"
+        bad "Nothing answers on $(old EDGE_IP) TCP $edge_tcp: is the edge running (./setup.sh edge there) and the port forwarded to it?"
       fi
     fi
   fi

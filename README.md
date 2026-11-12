@@ -150,8 +150,15 @@ itself when the platform's probe cannot reach a station directly.
 2. On the edge machine: `./setup.sh edge`. It asks for the domain and the API, and for the
    token only when it is not already in `deploy/edge/.env` or `.env` (or the platform
    refuses the saved one); it tests the token with the platform before starting anything, checks `edge.ROOT_DOMAIN`
-   points at this machine, starts the edge and says which ports to open: UDP 443
-   (stations), TCP 443 and 25433 (presenters).
+   points at this machine, starts the edge and says which ports to forward to it.
+
+**Behind a reverse proxy (Nginx Proxy Manager) that keeps TCP 443**: the platform's
+setup suggests TCP 25433 alone for presenters (`EDGE_PORTS`, told to stations so their
+address names it) and UDP 443 for stations (`EDGE_HOST`'s port; the proxy does not use
+UDP). Forward both on the router straight to the edge machine, never through the proxy:
+behind it, every presenter would look like the proxy and share one connection limit. A
+router forwards a port to one machine only: if 25433 already goes to a Nova station on that
+network, give the edge another.
 3. `./setup.sh check` on the platform includes the edge: its DNS record, its certificate,
    the name `edge`, and whether its address takes connections.
 

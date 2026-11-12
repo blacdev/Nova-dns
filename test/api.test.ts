@@ -281,7 +281,16 @@ describe("the tunnel's edge (Nova's docs/TUNNEL.md)", () => {
     expect(plain).not.toHaveProperty("tunnel");
     const s = await station("edgefm");
     const r = await on("/v1/studio/register", { hostname: "edgefm", access_code: s.accessCode, install_id: "i", app_version: "0.2.27" });
-    expect(r.json().tunnel).toEqual({ edge: "edge.example.test:443", server_name: "edge.example.test" });
+    expect(r.json().tunnel).toEqual({ edge: "edge.example.test:443", server_name: "edge.example.test", ports: [443, 25433] });
+  });
+
+  it("behind a proxy that keeps 443, the offer names the edge's own ports", async () => {
+    const proxied = buildApi(platform(db, { edgeIp: "203.0.113.50", edgeHost: "edge.example.test:4433", edgePorts: [25433] }).deps);
+    const s = await station("proxiedfm");
+    const r = await proxied.inject({ method: "POST", url: "/v1/studio/register", remoteAddress: "192.0.2.93",
+      payload: { hostname: "proxiedfm", access_code: s.accessCode } });
+    expect(r.json().tunnel).toEqual({ edge: "edge.example.test:4433", server_name: "edge.example.test", ports: [25433] });
+    await proxied.close();
   });
 
   it("via tunnel points the name at the edge and keeps the station's own address for the probe", async () => {
