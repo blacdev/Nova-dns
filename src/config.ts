@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { isSmtpSecurity, parseSmtpUrl, type Smtp, type SmtpSecurity } from "./lib/mail.js";
 
 /**
  * Everything the platform is told by its environment (see .env.example). Read once;
@@ -37,7 +38,13 @@ export interface Config {
    *  fetches its certificate with it (/internal/edge/...). */
   edgeToken: string;
   sessionSecret: string;
-  smtpUrl: string;
+  /** The SMTP server; "" sends nothing (each message is printed to the log). */
+  smtpHost: string;
+  /** 0: the security's usual port (465, 587, 25). */
+  smtpPort: number;
+  smtpSecurity: SmtpSecurity;
+  smtpUser: string;
+  smtpPassword: string;
   mailFrom: string;
   /** Proxies whose X-Forwarded-For is believed (comma-separated addresses). */
   trustedProxies: string[];
@@ -69,6 +76,31 @@ const ports = (v: string) => {
   return found;
 };
 
+/**
+ * SMTP_HOST, SMTP_PORT, SMTP_SECURITY, SMTP_USER and SMTP_PASSWORD; or the older SMTP_URL
+ * (smtps://user:password@host:465), split into the same parts.
+ */
+function smtpFromEnv(): Pick<Config, "smtpHost" | "smtpPort" | "smtpSecurity" | "smtpUser" | "smtpPassword"> {
+  const fromUrl: Smtp | null = parseSmtpUrl(env("SMTP_URL", ""));
+  if (env("SMTP_URL", "") && !fromUrl) throw new Error("SMTP_URL must look like smtps://user:password@smtp.example.com:465 (or use SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD)");
+  const security = env("SMTP_SECURITY", fromUrl?.security ?? "");
+  if (security && !isSmtpSecurity(security)) throw new Error("SMTP_SECURITY must be ssl, starttls or none");
+  const port = env("SMTP_PORT", fromUrl?.port ? String(fromUrl.port) : "0");
+  if (!/^\d{1,5}$/.test(port) || Number(port) > 65535) throw new Error("SMTP_PORT must be a port number");
+  return {
+    smtpHost: env("SMTP_HOST", fromUrl?.host ?? ""),
+    smtpPort: Number(port),
+    // Without a choice: SSL/TLS on 465, STARTTLS anywhere else.
+    smtpSecurity: (security || (port === "0" || port === "465" ? "ssl" : "starttls")) as SmtpSecurity,
+    smtpUser: env("SMTP_USER", fromUrl?.user ?? ""),
+    smtpPassword: env("SMTP_PASSWORD", fromUrl?.password ?? ""),
+  };
+}
+
+/** The SMTP part of the configuration, for the mailer; null when no server is set. */
+export const smtpOf = (c: Config): Smtp | null =>
+  c.smtpHost ? { host: c.smtpHost, port: c.smtpPort, security: c.smtpSecurity, user: c.smtpUser, password: c.smtpPassword } : null;
+
 export function loadConfig(): Config {
   const rootDomain = env("ROOT_DOMAIN").toLowerCase().replace(/\.$/, "");
   if (env("EDGE_IP", "") && !isIP(env("EDGE_IP", ""))) throw new Error("EDGE_IP must be the edge's public address (an IP address)");
@@ -94,7 +126,7 @@ export function loadConfig(): Config {
     edgePorts: ports(env("EDGE_PORTS", "443,25433")),
     edgeToken: env("EDGE_TOKEN", ""),
     sessionSecret: env("SESSION_SECRET"),
-    smtpUrl: env("SMTP_URL", ""),
+    ...smtpFromEnv(),
     mailFrom: env("MAIL_FROM", `Nova <no-reply@${rootDomain}>`),
     trustedProxies: list(env("TRUSTED_PROXIES", "127.0.0.1,::1")),
     apiPort: Number(env("API_PORT", "8080")),

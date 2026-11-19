@@ -47,6 +47,8 @@ load_old() { # KEY=VALUE lines of an existing settings file become the defaults
     case "$line" in ''|\#*) continue ;; esac
     key=${line%%=*}
     OLD[$key]=${line#*=}
+    # A value written in single quotes (SMTP_PASSWORD) is read without them.
+    case "${OLD[$key]}" in \'*\') OLD[$key]=${OLD[$key]:1:${#OLD[$key]}-2} ;; esac
   done < "$file"
 }
 old() { printf '%s' "${OLD[$1]:-${2:-}}"; }
@@ -77,6 +79,12 @@ ask_secret() { # like ask_required, but a saved value is offered without being s
     [ "$INPUT_ENDED" = 1 ] && fail "No answer for \"$q\", and nothing more to read."
     warn "This one is needed."
   done
+}
+ask_password() { # ask_password VAR "question" default: optional; a saved value is kept without being shown
+  local var=$1 q=$2 def=${3:-} reply=""
+  if [ -n "$def" ]; then read -r -s -p "  $q [Enter keeps the saved one]: " reply || INPUT_ENDED=1; else read -r -s -p "  $q: " reply || INPUT_ENDED=1; fi
+  echo
+  printf -v "$var" '%s' "${reply:-$def}"
 }
 ask_domain() { # ask_domain VAR "question" default: a bare domain name, tidied (no https://, no path)
   local var=$1 v
@@ -110,7 +118,10 @@ write_env() { # write_env FILE: the KEY=VALUE pairs in ENV_ORDER, private to thi
   tmp=$(mktemp)
   {
     echo "# Written by setup.sh on $(date -u +%Y-%m-%d). Keep it private; never commit it."
-    for k in "${ENV_ORDER[@]}"; do printf '%s=%s\n' "$k" "${ENV[$k]}"; done
+    for k in "${ENV_ORDER[@]}"; do
+      # A password may hold spaces or #: single quotes keep it as typed.
+      if [ "$k" = SMTP_PASSWORD ] && [ -n "${ENV[$k]}" ]; then printf "%s='%s'\n" "$k" "${ENV[$k]}"; else printf '%s=%s\n' "$k" "${ENV[$k]}"; fi
+    done
   } > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$file"
@@ -350,9 +361,38 @@ setup_platform() {
 
   bold "4. People and email"
   ask_required ADMIN_EMAILS "Admin email(s), comma separated (they become admins when they sign up)" "$(old ADMIN_EMAILS)"
-  note "Email sends sign-up confirmations and password resets, e.g. smtps://user:pass@smtp.example.com:465"
-  ask SMTP_URL "SMTP address (empty: emails are only written to the dashboard's log)" "$(old SMTP_URL)"
-  [ -n "$SMTP_URL" ] || warn "No email: find confirmation links with: docker compose logs dashboard | grep -A3 '\[mail\]'"
+  note "Email sends sign-up confirmations and password resets. Your provider gives you a host, port, username and password."
+  note "You can also set it later in the dashboard (Admin > Settings > Email), with a test button."
+  # An SMTP_URL from an earlier version: its parts are offered as the answers.
+  local u="$(old SMTP_URL)" uhost="" uport="" usec="" uuser="" upass=""
+  if [[ "$u" =~ ^(smtps?)://(([^:@]*)(:([^@]*))?@)?([^:/]+)(:([0-9]+))? ]]; then
+    usec=$([ "${BASH_REMATCH[1]}" = smtps ] && echo ssl || echo starttls)
+    uuser=$(printf '%b' "${BASH_REMATCH[3]//%/\\x}"); upass=$(printf '%b' "${BASH_REMATCH[5]//%/\\x}")
+    uhost=${BASH_REMATCH[6]}; uport=${BASH_REMATCH[8]}
+  fi
+  ask SMTP_HOST "SMTP host, e.g. smtp.gmail.com (empty: emails are only written to the dashboard's log)" "$(old SMTP_HOST "$uhost")"
+  SMTP_PORT="" SMTP_SECURITY="" SMTP_USER="" SMTP_PASSWORD=""
+  if [ -n "$SMTP_HOST" ]; then
+    SMTP_HOST=${SMTP_HOST#*://}; SMTP_HOST=${SMTP_HOST%%[:/]*}
+    note "ssl: encrypted from the start (port 465). starttls: upgraded after connecting (port 587). none: no encryption (port 25)."
+    choose SMTP_SECURITY "Security" "$(old SMTP_SECURITY "${usec:-ssl}")" ssl starttls none
+    local port_def=465; [ "$SMTP_SECURITY" = starttls ] && port_def=587; [ "$SMTP_SECURITY" = none ] && port_def=25
+    while :; do
+      ask SMTP_PORT "Port" "$(old SMTP_PORT "${uport:-$port_def}")"
+      [[ "$SMTP_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$SMTP_PORT" -ge 1 ] && [ "$SMTP_PORT" -le 65535 ] && break
+      [ "$INPUT_ENDED" = 1 ] && fail "\"$SMTP_PORT\" is not a port."
+      warn "A port is a number, usually 465 or 587."
+    done
+    ask SMTP_USER "Username (often your email address; empty if the server needs no sign-in)" "$(old SMTP_USER "$uuser")"
+    if [ -n "$SMTP_USER" ]; then
+      while :; do
+        ask_password SMTP_PASSWORD "Password (not shown as you type)" "$(old SMTP_PASSWORD "$upass")"
+        case "$SMTP_PASSWORD" in *"'"*) warn "A password with ' in it cannot go in .env: leave it empty here and enter it in the dashboard (Admin > Settings > Email)."; SMTP_PASSWORD=""; [ "$INPUT_ENDED" = 1 ] && break ;; *) break ;; esac
+      done
+    fi
+  else
+    warn "No email: find confirmation links with: docker compose logs dashboard | grep -A3 '\[mail\]'"
+  fi
 
   bold "5. In front of the API and dashboard"
   note "caddy:  this machine takes ports 80 and 443 and gets certificates by itself."
@@ -419,7 +459,7 @@ setup_platform() {
     [ACME_DIRECTORY_URL]=$ACME_DIRECTORY_URL [ACME_EMAIL]=$ACME_EMAIL [CERT_WEEKLY_LIMIT]=$(old CERT_WEEKLY_LIMIT 50)
     [TURN_SHARED_SECRET]=$TURN_SHARED_SECRET [TURN_SHARED_SECRET_PREVIOUS]=$(old TURN_SHARED_SECRET_PREVIOUS)
     [TURN_HOST]="turn.$ROOT_DOMAIN" [TURN_USAGE_TOKEN]=$TURN_USAGE_TOKEN [API_BASE]="https://api.$ROOT_DOMAIN"
-    [SESSION_SECRET]=$SESSION_SECRET [SMTP_URL]=$SMTP_URL [MAIL_FROM]="$(old MAIL_FROM "Nova <no-reply@$ROOT_DOMAIN>")"
+    [SESSION_SECRET]=$SESSION_SECRET [SMTP_HOST]=$SMTP_HOST [SMTP_PORT]=$SMTP_PORT [SMTP_SECURITY]=$SMTP_SECURITY [SMTP_USER]=$SMTP_USER [SMTP_PASSWORD]=$SMTP_PASSWORD [MAIL_FROM]="$(old MAIL_FROM "Nova <no-reply@$ROOT_DOMAIN>")"
     [ADMIN_EMAILS]=$ADMIN_EMAILS [SUBDOMAIN_LIMIT]=$(old SUBDOMAIN_LIMIT 1)
     [TRUSTED_PROXIES]=$TRUSTED_PROXIES [API_PORT]=$API_PORT [DASHBOARD_PORT]=$DASHBOARD_PORT
     [PROXY_IP]=${PROXY_IP:-}
@@ -427,7 +467,7 @@ setup_platform() {
   )
   ENV_ORDER=(ROOT_DOMAIN DASHBOARD_URL POSTGRES_PASSWORD DATABASE_URL DNS_PROVIDER CLOUDFLARE_API_TOKEN
     CLOUDFLARE_ZONE_ID ACME_DIRECTORY_URL ACME_EMAIL CERT_WEEKLY_LIMIT TURN_SHARED_SECRET
-    TURN_SHARED_SECRET_PREVIOUS TURN_HOST TURN_USAGE_TOKEN API_BASE SESSION_SECRET SMTP_URL MAIL_FROM
+    TURN_SHARED_SECRET_PREVIOUS TURN_HOST TURN_USAGE_TOKEN API_BASE SESSION_SECRET SMTP_HOST SMTP_PORT SMTP_SECURITY SMTP_USER SMTP_PASSWORD MAIL_FROM
     ADMIN_EMAILS SUBDOMAIN_LIMIT TRUSTED_PROXIES API_PORT DASHBOARD_PORT PROXY_IP EDGE_IP EDGE_HOST EDGE_PORTS EDGE_TOKEN)
   if [ -f .env ] && [ -n "$(old POSTGRES_PASSWORD)" ] && [ "$(old POSTGRES_PASSWORD)" != "$POSTGRES_PASSWORD" ]; then
     warn "The database password changed; an existing database keeps its old one. Keep the old .env if it has data."
@@ -758,7 +798,7 @@ setup_check() {
   else
     warn "Certificates are test certificates (staging): browsers warn about them. Run ./setup.sh and choose production once a station works."
   fi
-  [ -n "$(old SMTP_URL)" ] && good "Email is sent through your SMTP server." || warn "No SMTP address: confirmation links are only written to the dashboard's log."
+  [ -n "$(old SMTP_HOST "$(old SMTP_URL)")" ] && good "Email is sent through your SMTP server ($(old SMTP_HOST "your SMTP_URL")). Send a test from Admin > Settings > Email." || warn "No SMTP server: confirmation links are only written to the dashboard's log."
   [ -n "$(old ADMIN_EMAILS)" ] && good "Admins: $(old ADMIN_EMAILS)" || bad "ADMIN_EMAILS is empty: nobody becomes an admin."
 
   bold "DNS for station names"

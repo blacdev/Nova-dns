@@ -4,23 +4,29 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { LightMyRequestResponse } from "fastify";
 import { buildDashboard } from "../src/dashboard/app.js";
 import type { Db } from "../src/db/db.js";
-import type { Mail } from "../src/lib/mail.js";
+import { parseSmtpUrl, type Mail, type Smtp } from "../src/lib/mail.js";
 import { totpAt } from "../src/lib/secrets.js";
 import { LiveConfig } from "../src/lib/settings.js";
-import { freshDb, platform } from "./helpers.js";
+import { freshDb, person, platform } from "./helpers.js";
 
 let db: Db;
 let app: ReturnType<typeof buildDashboard>;
 let p: ReturnType<typeof platform>;
 let live: LiveConfig;
 const mails: Mail[] = [];
+const smtpTests: { smtp: Smtp; from: string; to: string }[] = [];
+let smtpFails = "";
 const PW = "correct horse battery";
 
 beforeAll(async () => {
   db = await freshDb();
   p = platform(db, { dashboardUrl: "http://app.example.test" });
   live = new LiveConfig(p.config, db, { dns: p.dns });
-  app = buildDashboard({ db, dns: p.dns, config: p.config, live, mail: async (m) => { mails.push(m); } });
+  app = buildDashboard({ db, dns: p.dns, config: p.config, live, mail: async (m) => { mails.push(m); },
+    testSmtp: async (smtp, from, to) => {
+      if (smtpFails) throw new Error(smtpFails);
+      smtpTests.push({ smtp, from, to });
+    } });
 });
 afterAll(async () => {
   await app.close();
@@ -283,14 +289,48 @@ describe("settings", () => {
     await chief.sudo("/admin/settings");
     expect((await chief.get("/admin/settings")).body).toContain("Cloudflare credentials");
 
-    await chief.post("/admin/settings/mail", { smtpUrl: "smtps://mailer:s3cret-pass@smtp.example.test:465", mailFrom: "Radio <hi@example.test>" }, "/admin/settings");
-    expect(p.config.smtpUrl).toBe("smtps://mailer:s3cret-pass@smtp.example.test:465");
+    const smtpForm = { smtpHost: "smtp.example.test", smtpSecurity: "starttls", smtpPort: "", smtpUser: "mailer@example.test", smtpPassword: "s3cret p@ss/#word", mailFromName: "Radio", mailFromEmail: "hi@example.test" };
+    await chief.post("/admin/settings/mail", smtpForm, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("smtp.example.test:587");
+    expect([p.config.smtpHost, p.config.smtpPort, p.config.smtpSecurity, p.config.smtpUser]).toEqual(["smtp.example.test", 587, "starttls", "mailer@example.test"]);
+    // Characters that broke the old single address are fine as a separate password.
+    expect(p.config.smtpPassword).toBe("s3cret p@ss/#word");
     expect(p.config.mailFrom).toBe("Radio <hi@example.test>");
     const raw = JSON.stringify((await db.query("SELECT * FROM settings")).rows) + JSON.stringify((await db.query("SELECT * FROM audit_log")).rows);
-    expect(raw).not.toContain("s3cret-pass");
-    const page = (await chief.get("/admin/settings")).body;
-    expect(page).not.toContain("s3cret-pass");
-    expect(page).toContain("smtps://mailer:••••@smtp.example.test:465");
+    expect(raw).not.toContain("s3cret");
+    let page = (await chief.get("/admin/settings")).body;
+    expect(page).not.toContain("s3cret");
+    expect(page).toContain('value="smtp.example.test"');
+
+    // Changing only the port keeps the password (an empty box means unchanged).
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpSecurity: "ssl", smtpPort: "2465", smtpPassword: "" }, "/admin/settings");
+    expect([p.config.smtpPort, p.config.smtpSecurity, p.config.smtpPassword]).toEqual([2465, "ssl", "s3cret p@ss/#word"]);
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpHost: "smtp://bad", smtpPassword: "" }, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("no smtp:// in front");
+
+    // The test uses the form's values before they are saved, and explains failures.
+    await chief.post("/admin/settings/test-mail", { ...smtpForm, smtpHost: "other.example.test", smtpPassword: "", testTo: "ops@example.test" }, "/admin/settings");
+    expect(smtpTests.at(-1)).toMatchObject({ to: "ops@example.test", from: "Radio <hi@example.test>", smtp: { host: "other.example.test", port: 587, password: "s3cret p@ss/#word" } });
+    expect(p.config.smtpHost).toBe("smtp.example.test");
+    smtpFails = "The server refused the username or password.";
+    await chief.post("/admin/settings/test-mail", { ...smtpForm, testTo: "ops@example.test" }, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("refused the username or password");
+    smtpFails = "";
+
+    // Removing the password.
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpPassword: "", clearSmtpPassword: "1" }, "/admin/settings");
+    expect(p.config.smtpPassword).toBe("");
+
+    // An address saved by an earlier version is read in parts, then written out on the next save.
+    await db.query("DELETE FROM settings WHERE key LIKE 'smtp%'");
+    await db.query("INSERT INTO settings (key, value, secret) VALUES ('smtpUrl', $1, true)", [(await import("../src/lib/secrets.js")).encrypt(p.config.sessionSecret, "smtps://old%40example.test:pa%3Ass@legacy.example.test:465")]);
+    await live.reload();
+    expect([p.config.smtpHost, p.config.smtpSecurity, p.config.smtpUser, p.config.smtpPassword]).toEqual(["legacy.example.test", "ssl", "old@example.test", "pa:ss"]);
+    page = (await chief.get("/admin/settings")).body;
+    expect(page).toContain("Saved as one SMTP address by an earlier version");
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpHost: "legacy.example.test", smtpSecurity: "ssl", smtpPort: "465", smtpUser: "old@example.test", smtpPassword: "" }, "/admin/settings");
+    expect((await db.query("SELECT 1 FROM settings WHERE key = 'smtpUrl'")).rowCount).toBe(0);
+    expect(p.config.smtpPassword).toBe("pa:ss");
 
     // Cloudflare: the DNS provider changes without a restart.
     expect(p.dns.providerName).toBe("memory");
@@ -298,7 +338,7 @@ describe("settings", () => {
     expect(p.config.cloudflareZoneId).toBe("a".repeat(32));
     expect(p.dns.providerName).toBe("cloudflare");
     // Another process (a fresh LiveConfig over the same database) sees the same.
-    const other = { ...p.config, dnsProvider: "memory" as const, cloudflareApiToken: "", cloudflareZoneId: "", smtpUrl: "" };
+    const other = { ...p.config, dnsProvider: "memory" as const, cloudflareApiToken: "", cloudflareZoneId: "", smtpHost: "" };
     await new LiveConfig(other, db).reload();
     expect(other.cloudflareApiToken).toBe("x".repeat(40));
 
@@ -307,6 +347,12 @@ describe("settings", () => {
 
     await chief.post("/admin/settings/acme", { acmeEmail: "not an email" }, "/admin/settings");
     expect(await chief.flash("/admin/settings")).toContain("not an email address");
+  });
+
+  it("read SMTP_URL from earlier versions", () => {
+    expect(parseSmtpUrl("smtp://u:p@mail.example.test:587")).toEqual({ host: "mail.example.test", port: 587, security: "starttls", user: "u", password: "p" });
+    expect(parseSmtpUrl("smtp://relay.example.test:25")?.security).toBe("none");
+    expect(parseSmtpUrl("https://example.test")).toBeNull();
   });
 
   it("are not for admins without the permission", async () => {
@@ -319,5 +365,141 @@ describe("settings", () => {
     expect((await roleOf("helper@example.test")).role).toBe("superadmin");
     expect((await roleOf("chief@example.test")).role).toBe("admin");
     expect((await roleOf("chief@example.test")).permissions).toContain("billing.manage");
+  });
+});
+
+describe("lists", () => {
+  it("page through people and filter them", async () => {
+    for (let i = 0; i < 60; i++) await person(db, `bulk${String(i).padStart(2, "0")}@example.test`);
+    await db.query("UPDATE users SET last_login_at = now() WHERE email LIKE 'bulk%' AND email <> 'bulk07@example.test'");
+    const total = Number((await db.query("SELECT count(*) AS n FROM users")).rows[0].n);
+    let page = (await chief.get("/admin/users")).body;
+    expect(page).toContain(`Showing 1–50 of ${total} people`);
+    page = (await chief.get("/admin/users?page=2")).body;
+    expect(page).toContain(`Showing 51–${Math.min(100, total)} of ${total} people`);
+    page = (await chief.get("/admin/users?q=bulk&show=never")).body;
+    expect(page).toContain("bulk07@example.test");
+    expect(page).not.toContain("bulk08@example.test");
+    // A % in the search matches only a %.
+    expect((await chief.get("/admin/users?q=%25")).body).toContain("No one found");
+    page = (await chief.get("/admin/users?role=admin")).body;
+    expect(page).toContain("chief@example.test");
+    expect(page).not.toContain("bulk00@example.test");
+  });
+
+  it("keep what was typed when a form comes back, but never a secret", async () => {
+    await chief.post("/admin/stations", { email: "nobody@example.test", label: "kept-label" }, "/admin/stations");
+    const page = (await chief.get("/admin/stations")).body;
+    expect(page).toContain('value="kept-label"');
+    expect(page).toContain("There is no account for nobody@example.test");
+    expect(page).toContain("data-open-now");
+    // Shown once: the next page is clean.
+    expect((await chief.get("/admin/stations")).body).not.toContain('value="kept-label"');
+  });
+
+  it("filter stations and delete one from the list", async () => {
+    await person(db, "lister@example.test");
+    await chief.post("/admin/stations", { email: "lister@example.test", label: "listed" }, "/admin/stations");
+    const id = (await db.query<{ id: number }>("SELECT id FROM subdomains WHERE label = 'listed'")).rows[0].id;
+    await chief.post(`/admin/stations/${id}/suspend`, { back: "/admin/stations?state=suspended" }, "/admin/stations");
+    let page = (await chief.get("/admin/stations?state=suspended")).body;
+    expect(page).toContain("listed.example.test");
+    expect((await chief.get("/admin/stations?state=online")).body).not.toContain("listed.example.test");
+    const r = await chief.post(`/stations/${id}/delete`, { confirm: "listed", back: "/admin/stations?state=suspended" }, "/admin/stations");
+    expect(r.headers.location).toBe("/admin/stations?state=suspended");
+    expect(await chief.flash("/admin/stations?state=suspended")).toBe("listed.example.test is deleted.");
+    expect((await chief.get("/admin/stations?state=suspended")).body).not.toContain(`/stations/${id}"`);
+  });
+
+  it("warn instead of overwriting a name, and edit one", async () => {
+    await chief.post("/admin/names", { label: "keepme", kind: "reserved", reason: "ours" }, "/admin/names");
+    await chief.post("/admin/names", { label: "keepme", kind: "blocked", reason: "theirs" }, "/admin/names");
+    expect(await chief.flash("/admin/names")).toContain("already reserved");
+    expect((await db.query("SELECT kind, reason FROM reserved_names WHERE label = 'keepme'")).rows[0]).toEqual({ kind: "reserved", reason: "ours" });
+    await chief.post("/admin/names/edit", { label: "keepme", kind: "blocked", reason: "changed" }, "/admin/names");
+    expect((await db.query("SELECT kind, reason FROM reserved_names WHERE label = 'keepme'")).rows[0]).toEqual({ kind: "blocked", reason: "changed" });
+    expect((await chief.get("/admin/names?kind=blocked&q=keep")).body).toContain("keepme");
+  });
+
+  it("retry a failed certificate", async () => {
+    await person(db, "certy@example.test");
+    await chief.post("/admin/stations", { email: "certy@example.test", label: "certy" }, "/admin/stations");
+    const sd = (await db.query<{ id: number }>("SELECT id FROM subdomains WHERE label = 'certy'")).rows[0].id;
+    const c = (await db.query<{ id: number }>("INSERT INTO certificates (subdomain_id, fqdn, status, csr_pem, error, attempts) VALUES ($1, 'certy.example.test', 'failed', 'csr', 'boom', 5) RETURNING id", [sd])).rows[0].id;
+    expect((await chief.get("/admin/certificates?view=failed")).body).toContain("certy.example.test");
+    await chief.post(`/admin/certificates/${c}/retry`, { back: "/admin/certificates?view=failed" }, "/admin/certificates?view=failed");
+    expect((await db.query("SELECT status, attempts, error FROM certificates WHERE id = $1", [c])).rows[0]).toEqual({ status: "pending", attempts: 0, error: null });
+    // A newer certificate replaced it: nothing to retry.
+    await db.query("INSERT INTO certificates (subdomain_id, fqdn, status, csr_pem, created_at) VALUES ($1, 'certy.example.test', 'issued', 'csr', now() + interval '1 minute')", [sd]);
+    await db.query("UPDATE certificates SET status = 'failed' WHERE id = $1", [c]);
+    await chief.post(`/admin/certificates/${c}/retry`, {}, "/admin/certificates?view=failed");
+    expect(await chief.flash("/admin/certificates")).toContain("cannot be retried");
+  });
+
+  it("filter the audit log by area and date, and show a payment", async () => {
+    let page = (await chief.get("/admin/audit?area=name")).body;
+    expect(page).toContain("name.update");
+    expect(page).not.toContain("user.login");
+    page = (await chief.get("/admin/audit?area=name&to=2000-01-01")).body;
+    expect(page).toContain("Nothing found");
+    const uid = await idOf("certy@example.test");
+    const pid = (await db.query<{ id: number }>(`INSERT INTO payments (reference, user_id, email, plan_name, period, provider, live, amount_minor, currency, status)
+      VALUES ('ref_detail', $1, 'certy@example.test', 'Pro', 'month', 'stripe', false, 1999, 'USD', 'failed') RETURNING id`, [uid])).rows[0].id;
+    page = (await chief.get(`/admin/billing/payments/${pid}`)).body;
+    expect(page).toContain("ref_detail");
+    expect(page).toContain("$19.99");
+    expect((await chief.get("/admin/billing?status=failed&q=ref_det")).body).toContain("ref_detail");
+    expect((await chief.get("/admin/billing?status=paid&q=ref_det")).body).not.toContain("ref_detail");
+  });
+});
+
+describe("admin changes", () => {
+  it("a plan form keeps what was typed, and the default plan cannot be deleted", async () => {
+    await chief.post("/admin/plans", { name: "Kept plan", limit: "3", price: "9.999", currency: "USD", period: "year" }, "/admin/plans/new");
+    const page = (await chief.get("/admin/plans/new")).body;
+    expect(page).toContain('value="Kept plan"');
+    expect(page).toContain('value="9.999"');
+    expect(page).toContain('class="field-error" id="price-error">Write the price like 19.99.');
+    expect(page).toMatch(/value="year" checked/);
+    const def = (await db.query<{ id: number }>("SELECT id FROM plans WHERE is_default")).rows[0].id;
+    await chief.post(`/admin/plans/${def}/delete`, {}, `/admin/plans/${def}`);
+    expect(await chief.flash(`/admin/plans/${def}`)).toContain("cannot be deleted");
+    expect((await db.query("SELECT 1 FROM plans WHERE id = $1", [def])).rowCount).toBe(1);
+  });
+
+  it("an added person is invited until they sign in; the invitation can be sent again", async () => {
+    await chief.post("/admin/users", { email: "invitee@example.test", plan: "" }, "/admin/users");
+    const id = await idOf("invitee@example.test");
+    expect((await chief.get("/admin/users?show=invited")).body).toContain("invitee@example.test");
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("Resend the invitation");
+    const before = mails.length;
+    await chief.post(`/admin/users/${id}/reset`, {}, `/admin/users/${id}`);
+    expect(await chief.flash(`/admin/users/${id}`)).toContain("new invitation");
+    expect(mails.length).toBe(before + 1);
+    expect(mails.at(-1)!.text).toContain("Open this link within 3 days");
+    // The earlier link no longer works.
+    expect((await db.query("SELECT count(*)::int AS n FROM email_tokens WHERE user_id = $1 AND used_at IS NULL", [id])).rows[0].n).toBe(1);
+  });
+
+  it("an admin changes someone's email: confirmed again, old address told", async () => {
+    await person(db, "oldaddr@example.test");
+    const id = await idOf("oldaddr@example.test");
+    await chief.post(`/admin/users/${id}/email`, { email: "chief@example.test" }, `/admin/users/${id}`);
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("There is already an account for chief@example.test");
+    await chief.post(`/admin/users/${id}/email`, { email: "NewAddr@example.test" }, `/admin/users/${id}`);
+    const u = (await db.query("SELECT email, email_verified_at FROM users WHERE id = $1", [id])).rows[0];
+    expect(u).toEqual({ email: "newaddr@example.test", email_verified_at: null });
+    expect(mails.some((m) => m.to === "oldaddr@example.test" && m.subject.includes("email address was changed"))).toBe(true);
+    expect(mails.some((m) => m.to === "newaddr@example.test" && m.text.includes("/verify?token="))).toBe(true);
+  });
+
+  it("the email settings come back as typed after a test, asking for the password again", async () => {
+    await chief.sudo("/admin/settings");
+    await chief.post("/admin/settings/test-mail", { smtpHost: "mail.example.test", smtpSecurity: "ssl", smtpPort: "465", smtpUser: "me@example.test", smtpPassword: "typed-secret", mailFromName: "Nova", mailFromEmail: "me@example.test", testTo: "chief@example.test" }, "/admin/settings");
+    const page = (await chief.get("/admin/settings")).body;
+    expect(page).toContain('value="mail.example.test"');
+    expect(page).toContain("Type the password again to save it");
+    expect(page).not.toContain("typed-secret");
+    expect(p.config.smtpHost).not.toBe("mail.example.test");
   });
 });

@@ -19,8 +19,9 @@ import { hashSecret, newToken } from "../lib/secrets.js";
 import * as subs from "../lib/subdomains.js";
 import { adminGuard } from "./admin.js";
 import type { DashDeps, Helpers } from "./app.js";
-import { statusChip } from "./app.js";
+import { paymentBadge, statusChip } from "./app.js";
 import { badge, csrfField, day, emptyState, facts, field, formSection, html, icon, pageHead, panel, when, type Html } from "./html.js";
+import { choiceCards, FormState, segmented, filterBar, like, menu, menuLink, menuOpen, menuPost, menuSep, modal, opener, pageOf, paged, pager, table, withQuery } from "./ui.js";
 import type { Session } from "./session.js";
 
 interface UserRow {
@@ -36,6 +37,7 @@ interface UserRow {
   plan_id: number | null;
   plan_expires_at: Date | null;
   station_limit_override: number | null;
+  invited_at: Date | null;
 }
 
 interface PlanRow {
@@ -53,6 +55,8 @@ interface PlanRow {
 export const CURRENCIES = ["USD", "EUR", "GBP", "NGN", "GHS", "KES", "ZAR", "UGX", "TZS", "RWF", "XOF", "XAF", "EGP", "MAD", "CAD", "AUD", "INR", "JPY"];
 
 const roleName = (r: string) => (r === "superadmin" ? "Super admin" : r === "admin" ? "Admin" : "Station owner");
+/** Added by an admin and not signed in yet. */
+const invited = (u: { invited_at: Date | null; last_login_at: Date | null }) => !!u.invited_at && !u.last_login_at;
 const roleBadge = (r: string) => (r === "superadmin" ? badge("accent", "Super admin") : r === "admin" ? badge("info", "Admin") : badge("neutral", "Owner"));
 const isUnique = (e: unknown) => (e as { code?: string })?.code === "23505";
 export const priceText = (p: { price_minor: number | null; currency: string | null; period: string }) =>
@@ -68,7 +72,7 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     `SELECT p.id, p.name, p.description, p.station_limit, p.is_default, p.price_minor, p.currency, p.period, count(u.id)::int AS people
        FROM plans p LEFT JOIN users u ON u.plan_id = p.id GROUP BY p.id ORDER BY p.station_limit, lower(p.name)`)).rows;
   const loadUser = async (id: number) => Number.isSafeInteger(id) ? (await d.db.query<UserRow>(
-    `SELECT id, email, role, status, permissions, email_verified_at, totp_secret_enc IS NOT NULL AS totp, created_at, last_login_at, plan_id, plan_expires_at, station_limit_override
+    `SELECT id, email, role, status, permissions, email_verified_at, totp_secret_enc IS NOT NULL AS totp, created_at, last_login_at, plan_id, plan_expires_at, station_limit_override, invited_at
        FROM users WHERE id = $1`, [id])).rows[0] : undefined;
   const idOf = (req: FastifyRequest) => Number((req.params as { id: string }).id);
 
@@ -90,32 +94,69 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     <option value="">Default plan${all.find((p) => p.is_default) ? ` (${all.find((p) => p.is_default)!.name})` : ""}</option>
     ${all.map((p) => html`<option value="${p.id}"${p.id === current ? " selected" : ""}>${p.name} · ${stationWord(p.station_limit)}</option>`)}</select>`;
 
+  /** Station owner or admin, as two cards. */
+  const roleCards = (selected: string, id: string, adding = false) => choiceCards({ name: "role", id, label: "Role", selected, options: [
+    { value: "user", title: "Station owner", text: "Claims and runs their own stations." },
+    { value: "admin", title: "Admin", text: adding ? "Starts with no permissions; you tick them on their page. Needs two-step sign-in." : "Opens the admin console with the permissions ticked below. Needs two-step sign-in." }] });
+
   // ------------------------------------------------------------------ the list
 
   app.get("/admin/users", async (req, reply) => {
     const s = admin(req, reply, "users.view");
     if (!s) return reply;
-    const rows = (await d.db.query(
-      `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.created_at, u.last_login_at, u.station_limit_override, u.totp_secret_enc IS NOT NULL AS totp,
-              coalesce(CASE WHEN u.plan_expires_at IS NULL OR u.plan_expires_at > now() THEN p.name END, dp.name) AS plan, count(sd.id)::int AS stations
-         FROM users u LEFT JOIN plans p ON p.id = u.plan_id LEFT JOIN plans dp ON dp.is_default LEFT JOIN subdomains sd ON sd.user_id = u.id
-        WHERE $1 = '' OR lower(u.email) LIKE '%' || $1 || '%' GROUP BY u.id, p.name, dp.name ORDER BY u.created_at DESC LIMIT 200`, [q(req)])).rows;
+    const query = req.query as Record<string, string>;
+    const all = await plans();
+    const role = ["user", "admin"].includes(query.role) ? query.role : "";
+    const status = ["active", "suspended"].includes(query.status) ? query.status : "";
+    const show = ["invited", "unconfirmed", "never", "no2fa", "2fa"].includes(query.show) ? query.show : "";
+    const plan = query.plan === "none" || all.some((p) => String(p.id) === query.plan) ? query.plan : "";
+    const pg = pageOf(query);
+    const { rows, total } = await paged<{ id: number; email: string; role: Role; status: string; email_verified_at: Date | null; created_at: Date; last_login_at: Date | null; invited_at: Date | null; station_limit_override: number | null; totp: boolean; plan: string | null; stations: number }>(d.db,
+      `SELECT u.id, u.email, u.role, u.status, u.email_verified_at, u.created_at, u.last_login_at, u.invited_at, u.station_limit_override, u.totp_secret_enc IS NOT NULL AS totp,
+              coalesce(CASE WHEN u.plan_expires_at IS NULL OR u.plan_expires_at > now() THEN p.name END, dp.name) AS plan,
+              (SELECT count(*) FROM subdomains sd WHERE sd.user_id = u.id)::int AS stations
+         FROM users u LEFT JOIN plans p ON p.id = u.plan_id LEFT JOIN plans dp ON dp.is_default
+        WHERE ($1 = '' OR lower(u.email) LIKE '%' || $1 || '%')
+          AND ($2 = '' OR ($2 = 'user' AND u.role = 'user') OR ($2 = 'admin' AND u.role IN ('admin', 'superadmin')))
+          AND ($3 = '' OR u.status = $3)
+          AND ($4 = '' OR ($4 = 'invited' AND u.invited_at IS NOT NULL AND u.last_login_at IS NULL) OR ($4 = 'unconfirmed' AND u.email_verified_at IS NULL) OR ($4 = 'never' AND u.last_login_at IS NULL)
+               OR ($4 = 'no2fa' AND u.totp_secret_enc IS NULL) OR ($4 = '2fa' AND u.totp_secret_enc IS NOT NULL))
+          AND ($5 = '' OR ($5 = 'none' AND (u.plan_id IS NULL OR u.plan_expires_at <= now())) OR (u.plan_id::text = $5 AND (u.plan_expires_at IS NULL OR u.plan_expires_at > now())))
+        ORDER BY u.created_at DESC`, [like(q(req)), role, status, show, plan], pg);
     const manage = can(s.user, "users.manage");
-    const all = manage ? await plans() : [];
-    return h.render(req, reply, "People", html`${pageHead({ title: "People", sub: "Everyone with an account: station owners and admins." })}
-      ${manage ? panel({ title: "Add a person", sub: "They get an email with a link to choose their password (it works for 3 days)." }, html`
-        <form method="post" action="/admin/users">${csrfField(s.csrf)}<div class="form-grid">
-          ${field({ id: "add-email", label: "Email", control: html`<input id="add-email" name="email" type="email" required autocomplete="off" placeholder="name@example.com">` })}
-          ${field({ id: "add-plan", label: "Plan", control: planPicker(all, null, "add-plan") })}
-          ${isSuper(s.user) ? field({ id: "add-role", label: "Role", control: html`<select id="add-role" name="role"><option value="user">Station owner</option><option value="admin">Admin (no permissions yet)</option></select>` }) : ""}</div>
-          <div class="row"><button class="primary">${icon("plus", 16)} Add person</button></div></form>`) : ""}
-      ${panel({ flush: true }, html`<div class="toolbar"><form method="get"><input type="search" name="q" value="${q(req)}" placeholder="Search by email" aria-label="Search"><button>Search</button></form></div>
-        ${rows.length ? html`<div class="table-wrap"><table><tr><th>Person</th><th>Role</th><th>Status</th><th>Plan</th><th class="num">Stations</th><th class="wide-only">Last sign-in</th><th class="actions"></th></tr>${rows.map((u) => html`<tr>
-        <td><a href="/admin/users/${u.id}"><b>${u.email}</b></a><span class="sub">Joined ${day(u.created_at)}${u.email_verified_at ? "" : " · email not confirmed"}${u.totp ? " · 2FA" : ""}</span></td>
-        <td>${roleBadge(u.role)}</td><td>${u.status === "active" ? badge("ok", "Active") : badge("bad", "Suspended")}</td>
-        <td>${u.plan ?? "—"}${u.station_limit_override !== null ? html` <span class="sub">Own limit: ${u.station_limit_override}</span>` : ""}</td>
-        <td class="num">${u.stations}</td><td class="wide-only">${when(u.last_login_at)}</td><td class="actions"><a class="btn sm" href="/admin/users/${u.id}">Open</a></td>
-      </tr>`)}</table></div>` : emptyState("No one found", "Nothing matches that search.")}`)}`, h.takeFlash(req, reply));
+    const here = withQuery("/admin/users", query);
+    const add = h.takeForm(req, reply).for("user-add");
+    const deleteLink = (id: number) => (s.elevated ? `/admin/users/${id}#delete-person` : `/sudo?next=${encodeURIComponent(`/admin/users/${id}#delete-person`)}`);
+    return h.render(req, reply, "People", html`${pageHead({ title: "People", sub: "Everyone with an account: station owners and admins.",
+        actions: manage ? opener("add-person", html`${icon("plus", 16)} Add a person`, "primary") : "" })}
+      ${manage ? modal({ id: "add-person", title: "Add a person", text: "They get an email with a link to choose their password (it works for 3 days).", action: "/admin/users", csrf: s.csrf, submit: "Add person", open: add.returned,
+        body: html`${field({ id: "add-email", label: "Email", error: add.e("email"), control: html`<input id="add-email" name="email" type="email" required autocomplete="off" placeholder="name@example.com" value="${add.v("email")}">` })}
+          ${field({ id: "add-plan", label: "Plan", control: planPicker(all, add.v("plan") ? Number(add.v("plan")) : null, "add-plan") })}
+          ${isSuper(s.user) ? roleCards(add.v("role", "user"), "add-role", true) : ""}` }) : ""}
+      ${panel({ flush: true }, html`${filterBar({ path: "/admin/users", query, search: { placeholder: "Search by email" },
+          chips: { name: "role", label: "Role", options: [["", "Everyone"], ["user", "Station owners"], ["admin", "Admins"]] },
+          selects: [
+            { name: "status", label: "Status", options: [["", "Any status"], ["active", "Active"], ["suspended", "Suspended"]] },
+            { name: "show", label: "Account", options: [["", "Any account"], ["invited", "Invited, not signed in yet"], ["unconfirmed", "Email not confirmed"], ["never", "Never signed in"], ["no2fa", "Two-step off"], ["2fa", "Two-step on"]] },
+            { name: "plan", label: "Plan", options: [["", "Any plan"], ["none", "Default plan"], ...all.map((p) => [String(p.id), p.name] as [string, string])] },
+          ] })}
+        ${rows.length ? table(["Person", "Role", "Status", "Plan", { text: "Stations", cls: "num" }, { text: "Last sign-in", cls: "wide-only" }, { text: "", cls: "actions" }], rows.map((u) => {
+          const act = mayActOn(s.user, u);
+          return html`<tr>
+          <td><a href="/admin/users/${u.id}"><b>${u.email}</b></a><span class="sub">Joined ${day(u.created_at)}${u.email_verified_at ? "" : " · email not confirmed"}${u.totp ? " · 2FA" : ""}${u.last_login_at || u.invited_at ? "" : " · never signed in"}</span></td>
+          <td>${roleBadge(u.role)}</td><td>${u.status !== "active" ? badge("bad", "Suspended") : invited(u) ? badge("info", "Invited") : badge("ok", "Active")}</td>
+          <td>${u.plan ?? "—"}${u.station_limit_override !== null ? html` <span class="sub">Own limit: ${u.station_limit_override}</span>` : ""}</td>
+          <td class="num">${u.stations}</td><td class="wide-only">${when(u.last_login_at)}</td>
+          <td class="actions">${menu([
+            menuLink(`/admin/users/${u.id}`, "Open", "user"),
+            act && manage && menuPost(`/admin/users/${u.id}/reset`, invited(u) ? "Resend the invitation" : "Send a password link", s.csrf, { confirm: invited(u) ? `Send ${u.email} a new invitation? It works for 3 days; the earlier link stops working.` : `Email ${u.email} a link to choose a new password? It works for an hour.`, title: invited(u) ? "Resend the invitation" : "Send a password link", hidden: { back: here }, ic: "key" }),
+            act && manage && menuSep(),
+            act && manage && menuPost(`/admin/users/${u.id}/${u.status === "active" ? "suspend" : "unsuspend"}`, u.status === "active" ? "Suspend" : "Restore", s.csrf,
+              { confirm: u.status === "active" ? `Suspend ${u.email}? They are signed out and their stations stop resolving.` : `Restore ${u.email} and their stations?`, title: u.status === "active" ? "Suspend account" : "Restore account", danger: u.status === "active", hidden: { back: here }, ic: u.status === "active" ? "lock" : "check" }),
+            act && manage && menuLink(deleteLink(u.id), "Delete…", "alert"),
+          ], { aria: `Actions for ${u.email}` })}</td></tr>`;
+        })) : emptyState("No one found", "Nothing matches these filters.")}
+        ${pager("/admin/users", query, pg, total, "people")}`)}`, h.takeFlash(req, reply));
   });
 
   app.post("/admin/users", async (req, reply) => {
@@ -123,14 +164,15 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     if (!s) return reply;
     const f = h.form(req);
     const email = String(f.email ?? "").trim().toLowerCase();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return h.back(reply, "/admin/users", { kind: "bad", text: "That is not an email address." });
+    const bad = (text: string) => h.back(reply, "/admin/users", { kind: "bad", text }, { form: "user-add", values: f, errors: { email: text } });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return bad("That is not an email address.");
     const role: Role = isSuper(s.user) && f.role === "admin" ? "admin" : "user";
     const plan = /^\d+$/.test(String(f.plan ?? "")) ? Number(f.plan) : null;
     // A password nobody knows: the person chooses theirs through the emailed link.
     const r = await d.db.query<{ id: number }>(
-      `INSERT INTO users (email, password_hash, role, plan_id) VALUES ($1, $2, $3, (SELECT id FROM plans WHERE id = $4))
+      `INSERT INTO users (email, password_hash, role, plan_id, invited_at) VALUES ($1, $2, $3, (SELECT id FROM plans WHERE id = $4), now())
        ON CONFLICT DO NOTHING RETURNING id`, [email, await hashSecret(newToken()), role, plan]);
-    if (!r.rows[0]) return h.back(reply, "/admin/users", { kind: "bad", text: `There is already an account for ${email}.` });
+    if (!r.rows[0]) return bad(`There is already an account for ${email}.`);
     const id = r.rows[0].id;
     await audit(d.db, { actor: s.user.id, action: "user.create", target: email, ip: req.ip, metadata: { role } });
     const sent = await h.mailLink(id, email, "invite");
@@ -148,26 +190,45 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const a = await allowance(d.db, u.id, d.config.subdomainLimit);
     const stations = (await d.db.query(
       "SELECT sd.id, sd.label, sd.status, st.last_seen_at FROM subdomains sd JOIN studios st ON st.subdomain_id = sd.id WHERE sd.user_id = $1 ORDER BY sd.label", [u.id])).rows;
-    const payments = can(s.user, "billing.manage") ? (await d.db.query("SELECT plan_name, amount_minor, currency, status, created_at FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10", [u.id])).rows : [];
+    const payments = can(s.user, "billing.manage") ? (await d.db.query("SELECT id, plan_name, amount_minor, currency, status, created_at FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10", [u.id])).rows : [];
+    const paymentCount = payments.length === 10 ? Number((await d.db.query("SELECT count(*) AS n FROM payments WHERE user_id = $1", [u.id])).rows[0].n) : payments.length;
     const act = mayActOn(s.user, u);
+    const manage = can(s.user, "users.manage") && act;
     const editPlan = can(s.user, "users.manage") && (act || (isSuper(s.user) && u.id === s.user.id));
-    const post = (path: string, label: string, confirm = "", danger = false) =>
-      html`<form class="inline" method="post" action="/admin/users/${u.id}/${path}"${confirm ? html` data-confirm="${confirm}"` : ""}>${csrfField(s.csrf)}<button class="${danger ? "danger" : ""}">${label}</button></form>`;
-    const sudoLink = html`<a class="btn" href="/sudo?next=${encodeURIComponent(`/admin/users/${u.id}`)}">${icon("lock", 15)} Confirm it is you to continue</a>`;
+    const forms = h.takeForm(req, reply);
+    const stationForm = forms.for("user-station");
+    const sudoNext = (hash = "") => `/sudo?next=${encodeURIComponent(`/admin/users/${u.id}${hash}`)}`;
+    const sudoLink = html`<a class="btn" href="${sudoNext()}">${icon("lock", 15)} Confirm it is you to continue</a>`;
+    const base = `/admin/users/${u.id}`;
 
     let roles: Html | string = "";
     if (isSuper(s.user) && u.id !== s.user.id) {
       roles = panel({ title: "Role and permissions", sub: "Only you, the super admin, change these. An admin may do only what is ticked." }, s.elevated ? html`
         <form method="post" action="/admin/users/${u.id}/role">${csrfField(s.csrf)}
-          ${field({ id: "role", label: "Role", control: html`<select id="role" name="role" class="w-sm"><option value="user"${u.role === "user" ? " selected" : ""}>Station owner</option><option value="admin"${u.role === "admin" ? " selected" : ""}>Admin</option></select>` })}
+          ${roleCards(u.role === "admin" ? "admin" : "user", "role")}
           <div class="checks-grid">${ALL_PERMISSIONS.map((p) => html`<label class="check"><input type="checkbox" name="perm" value="${p}"${u.permissions.includes(p) ? " checked" : ""}><span><b>${p}</b><br><span class="dim">${PERMISSIONS[p]}</span></span></label>`)}</div>
           <div class="row"><button class="primary">Save role</button><span class="dim small">Ticks are ignored for a station owner.</span></div></form>
         ${u.role === "admin" && u.status === "active" ? html`<div class="callout" style="margin:24px 0 0">${icon("key")}<div><b>Hand over the super admin role</b><p>There is one super admin. ${u.email} takes over; you become an admin with every permission.</p></div>
-          <form method="post" action="/admin/users/${u.id}/superadmin" data-confirm="Hand the super admin role to ${u.email}? You cannot undo this yourself." style="margin-left:auto">${csrfField(s.csrf)}<button class="danger">Make super admin</button></form></div>` : ""}` : html`<p class="dim">Changing roles needs your identity confirmed again.</p>${sudoLink}`);
+          <form method="post" action="/admin/users/${u.id}/superadmin" data-confirm="Hand the super admin role to ${u.email}? You become an admin, and cannot undo this yourself." data-confirm-title="Hand over the super admin role" style="margin-left:auto">${csrfField(s.csrf)}<button class="danger">Make super admin</button></form></div>` : ""}` : html`<p class="dim">Changing roles needs your identity confirmed again.</p>${sudoLink}`);
     }
 
-    return h.render(req, reply, u.email, html`${pageHead({ title: u.email, back: { href: "/admin/users", text: "People" },
-        meta: html`${roleBadge(u.role)}${u.status === "active" ? badge("ok", "Active") : badge("bad", "Suspended")}${u.email_verified_at ? badge("ok", "Email confirmed") : badge("warn", "Email not confirmed")}${u.totp ? badge("ok", "2FA on") : badge("neutral", "2FA off")}` })}
+    const actions = manage ? menu([
+      menuOpen("change-email", "Change email…", { ic: "user" }),
+      u.email_verified_at ? "" : menuPost(`${base}/verify`, "Mark the email confirmed", s.csrf, { ic: "check" }),
+      menuPost(`${base}/reset`, invited(u) ? "Resend the invitation" : "Send a password link", s.csrf, { confirm: invited(u) ? `Send ${u.email} a new invitation? It works for 3 days; the earlier link stops working.` : `Email ${u.email} a link to choose a new password? It works for an hour.`, title: invited(u) ? "Resend the invitation" : "Send a password link", ic: "key" }),
+      u.totp ? menuPost(`${base}/totp-off`, "Turn off two-step sign-in", s.csrf, { confirm: `Turn off ${u.email}'s two-step sign-in and sign them out everywhere? Do this only once you know it is them.`, title: "Turn off two-step sign-in", danger: true, ic: "shield" }) : "",
+      menuPost(`${base}/signout`, "Sign out everywhere", s.csrf, { confirm: `Sign ${u.email} out of every device?`, title: "Sign out everywhere", ic: "logout" }),
+      menuSep(),
+      u.status === "active"
+        ? menuPost(`${base}/suspend`, "Suspend account", s.csrf, { confirm: `Suspend ${u.email}? They are signed out and their stations stop resolving.`, title: "Suspend account", danger: true, ic: "lock" })
+        : menuPost(`${base}/unsuspend`, "Restore account", s.csrf, { confirm: `Restore ${u.email} and their stations?`, title: "Restore account", ic: "check" }),
+      s.elevated ? menuOpen("delete-person", "Delete…", { danger: true, ic: "alert" }) : menuLink(sudoNext("#delete-person"), "Delete… (confirm it is you first)", "alert"),
+    ], { label: "Actions" }) : "";
+
+    return h.render(req, reply, u.email, html`${pageHead({ title: u.email, back: { href: "/admin/users", text: "People" }, actions,
+        meta: html`${roleBadge(u.role)}${u.status === "active" ? badge("ok", "Active") : badge("bad", "Suspended")}${u.email_verified_at ? badge("ok", "Email confirmed") : badge("warn", "Email not confirmed")}${u.totp ? badge("ok", "2FA on") : badge("neutral", "2FA off")}${invited(u) ? badge("info", `Invited ${day(u.invited_at)}`) : u.last_login_at ? "" : badge("neutral", "Never signed in")}` })}
+      ${!act && u.id !== s.user.id ? html`<div class="callout info">${icon("info")}<div><p>Only the super admin may change ${u.role === "superadmin" ? "the super admin's" : "an admin's"} account.</p></div></div>` : ""}
+      ${u.id === s.user.id ? html`<div class="callout info">${icon("info")}<div><p>This is you. Change your own account on <a href="/account">Account &amp; security</a>.</p></div></div>` : ""}
       <div class="split"><div>
       ${panel({ title: "Details" }, facts([
         ["Role", u.role === "admin" ? html`Admin <span class="sub dim small">${u.permissions.length ? u.permissions.join(", ") : "No permissions"}</span>` : roleName(u.role)],
@@ -179,25 +240,22 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
       ${editPlan ? panel({ title: "Plan and limit", sub: "Their own limit wins over any plan. Choosing a plan here has no end date." }, html`
         <form method="post" action="/admin/users/${u.id}/plan">${csrfField(s.csrf)}<div class="form-grid">
           ${field({ id: "plan", label: "Plan", control: planPicker(all, u.plan_id) })}
-          ${field({ id: "limit", label: "Own station limit", help: "Leave empty to follow the plan.", control: html`<input id="limit" type="number" name="limit" min="0" max="10000" value="${u.station_limit_override ?? ""}">` })}</div>
+          ${field({ id: "limit", label: "Own station limit", help: "Leave empty to follow the plan.", error: forms.for("user-plan").e("limit"), control: html`<input id="limit" type="number" name="limit" min="0" max="10000" value="${forms.for("user-plan").v("limit", u.station_limit_override ?? "")}">` })}</div>
           <div class="row"><button class="primary">Save</button>${can(s.user, "plans.manage") ? html`<a class="btn ghost" href="/admin/plans">Manage plans</a>` : ""}</div></form>`) : ""}
-      ${panel({ title: "Stations", flush: true }, html`${stations.length ? html`<div class="table-wrap"><table><tr><th>Address</th><th>Status</th><th class="actions"></th></tr>${stations.map((r) => html`<tr><td><b>${fqdnOf(r.label, d.config.rootDomain)}</b></td><td>${statusChip(r.status, r.last_seen_at)}</td>
-          <td class="actions">${can(s.user, "stations.view") ? html`<a class="btn sm" href="/stations/${r.id}">Open</a>` : ""}</td></tr>`)}</table></div>` : html`<div class="card-body"><p class="dim" style="margin:0">No stations.</p></div>`}
-        ${can(s.user, "stations.manage") ? html`<div class="card-body" style="border-top:1px solid var(--line)"><form method="post" action="/admin/stations">${csrfField(s.csrf)}<input type="hidden" name="email" value="${u.email}"><input type="hidden" name="back" value="user">
-          ${field({ id: "label", label: `Create a station for ${u.email}`, control: html`<div class="row tight"><div class="input-group" style="flex:1;min-width:220px"><input id="label" name="label" placeholder="kfm" required maxlength="63" autocomplete="off"><span class="addon">.${d.config.rootDomain}</span></div><button>Create</button></div>` })}</form></div>` : ""}`)}
-      ${payments.length ? panel({ title: "Payments", flush: true }, html`<div class="table-wrap"><table><tr><th>Date</th><th>Plan</th><th class="num">Amount</th><th>Status</th></tr>${payments.map((p) => html`<tr><td>${when(p.created_at)}</td><td>${p.plan_name}</td><td class="num">${formatMoney(Number(p.amount_minor), p.currency)}</td><td>${p.status === "paid" ? badge("ok", "Paid") : p.status === "pending" ? badge("info", "Pending") : badge("neutral", p.status)}</td></tr>`)}</table></div>`) : ""}
       ${roles}
       </div><div>
-      ${act ? panel({ title: "Account actions" }, html`<div style="display:grid;gap:10px">
-        ${u.email_verified_at ? "" : post("verify", "Mark the email confirmed")}
-        ${post("reset", "Send a password link", `Email ${u.email} a link to choose a new password?`)}
-        ${u.totp ? post("totp-off", "Turn off two-step sign-in", `Turn off ${u.email}'s two-step sign-in? Do this only once you know it is them.`) : ""}
-        ${post("signout", "Sign out everywhere", `Sign ${u.email} out of every device?`)}
-        ${u.status === "active" ? post("suspend", "Suspend account", `Suspend ${u.email} and all their stations?`, true) : post("unsuspend", "Restore account")}</div>`) : u.id === s.user.id ? "" : panel({}, html`<p class="dim" style="margin:0">Only the super admin may change ${u.role === "superadmin" ? "the super admin's" : "an admin's"} account.</p>`)}
-      ${act ? panel({ title: "Delete person", tone: "danger", sub: "Deletes the account and every station it has. Names are held for 30 days." }, s.elevated ? html`
-          <form method="post" action="/admin/users/${u.id}/delete">${csrfField(s.csrf)}${field({ id: "confirm", label: `Type ${u.email} to confirm`, control: html`<input id="confirm" name="confirm" required autocomplete="off">` })}
-          <div class="row"><button class="danger-solid">Delete this person</button></div></form>` : sudoLink) : ""}
-      </div></div>`, h.takeFlash(req, reply));
+      ${panel({ title: "Stations", flush: true }, html`${stations.length ? table(["Address", "Status", { text: "", cls: "actions" }], stations.map((r) => html`<tr><td><b>${fqdnOf(r.label, d.config.rootDomain)}</b></td><td>${statusChip(r.status, r.last_seen_at)}</td>
+          <td class="actions">${can(s.user, "stations.view") ? html`<a class="btn sm" href="/stations/${r.id}">Open</a>` : ""}</td></tr>`)) : html`<div class="card-body"><p class="dim" style="margin:0">No stations.</p></div>`}
+        ${can(s.user, "stations.manage") ? html`<div class="card-body" style="border-top:1px solid var(--line)"><form method="post" action="/admin/stations">${csrfField(s.csrf)}<input type="hidden" name="email" value="${u.email}"><input type="hidden" name="back" value="user">
+          ${field({ id: "label", label: "Create a station for them", error: stationForm.e("label"), control: html`<div class="row tight"><div class="input-group" style="flex:1;min-width:200px"><input id="label" name="label" placeholder="kfm" required maxlength="63" autocomplete="off" spellcheck="false" value="${stationForm.v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><button>Create</button></div>` })}</form></div>` : ""}`)}
+      ${payments.length ? panel({ title: "Payments", flush: true, actions: paymentCount > payments.length ? html`<a class="btn sm" href="/admin/billing?q=${encodeURIComponent(u.email)}">All ${paymentCount}</a>` : "" },
+        table(["Date", "Plan", { text: "Amount", cls: "num" }, "Status"], payments.map((p) => html`<tr><td style="white-space:nowrap"><a href="/admin/billing/payments/${p.id}">${day(p.created_at)}</a></td><td>${p.plan_name}</td><td class="num">${formatMoney(Number(p.amount_minor), p.currency)}</td><td>${paymentBadge(p.status)}</td></tr>`))) : ""}
+      </div></div>
+      ${manage ? modal({ id: "change-email", title: "Change email", action: `${base}/email`, csrf: s.csrf, submit: "Change email", open: forms.for("user-email").returned,
+        text: html`<p>${invited(u) ? "A new invitation goes to the new address." : "The new address must be confirmed: a link goes to it."} ${u.email} is told about the change.</p>`,
+        body: field({ id: "new-email", label: "New email", error: forms.for("user-email").e("email"), control: html`<input id="new-email" name="email" type="email" required autocomplete="off" maxlength="254" value="${forms.for("user-email").v("email", u.email)}">` }) }) : ""}
+      ${manage && s.elevated ? modal({ id: "delete-person", title: `Delete ${u.email}`, tone: "danger", action: `${base}/delete`, csrf: s.csrf, submit: "Delete this person", typed: u.email,
+        text: html`<p>This deletes the account and ${stations.length ? html`<b>${stations.length} station${stations.length === 1 ? "" : "s"}</b>` : "any stations it has"}. Their names are held for 30 days. Past payments stay in the records.</p>` }) : ""}`, h.takeFlash(req, reply));
   });
 
   app.post("/admin/users/:id/plan", async (req, reply) => {
@@ -209,7 +267,7 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const f = h.form(req);
     const plan = /^\d+$/.test(String(f.plan ?? "")) ? Number(f.plan) : null;
     const raw = String(f.limit ?? "").trim();
-    if (raw && !/^\d{1,5}$/.test(raw)) return h.back(reply, `/admin/users/${u.id}`, { kind: "bad", text: "The limit is a whole number, or empty." });
+    if (raw && !/^\d{1,5}$/.test(raw)) return h.back(reply, `/admin/users/${u.id}`, { kind: "bad", text: "The limit is a whole number, or empty." }, { form: "user-plan", values: f, errors: { limit: "A whole number from 0 to 10000, or empty." } });
     const limit = raw ? Number(raw) : null;
     // The same plan keeps what was paid for; a plan chosen here has no end.
     const r = await d.db.query(
@@ -223,46 +281,73 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   });
 
   // Account actions: each on someone the admin may act on (mayActOn).
-  const accountAction = (path: string, run: (s: Session, u: UserRow, req: FastifyRequest, reply: FastifyReply) => Promise<FastifyReply>, sudo = false) =>
+  const accountAction = (path: string, run: (s: Session, u: UserRow, req: FastifyRequest, reply: FastifyReply, to: string) => Promise<FastifyReply>, sudo = false) =>
     app.post(`/admin/users/:id/${path}`, async (req, reply) => {
       const s = admin(req, reply, "users.manage");
       if (!s) return reply;
       const u = await target(req, reply, s);
       if (!u) return reply;
       if (sudo && !h.requireSudo(req, reply, s, `/admin/users/${u.id}`)) return reply;
-      return run(s, u, req, reply);
+      // From the People list, back to it (with its filters).
+      const b = h.form(req).back ?? "";
+      return run(s, u, req, reply, /^\/admin\/users(\?[\w=&%.\-+]*)?$/.test(b) ? b : `/admin/users/${u.id}`);
     });
 
-  accountAction("verify", async (s, u, req, reply) => {
+  accountAction("verify", async (s, u, req, reply, to) => {
     await d.db.query("UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) WHERE id = $1", [u.id]);
     await audit(d.db, { actor: s.user.id, action: "user.verify", target: u.email, ip: req.ip });
-    return h.back(reply, `/admin/users/${u.id}`, { kind: "ok", text: "The email is marked confirmed." });
+    return h.back(reply, to, { kind: "ok", text: "The email is marked confirmed." });
   });
-  accountAction("reset", async (s, u, req, reply) => {
-    const sent = await h.mailLink(u.id, u.email, "reset");
-    await audit(d.db, { actor: s.user.id, action: "user.reset_link", target: u.email, ip: req.ip });
-    return h.back(reply, `/admin/users/${u.id}`, sent ? { kind: "ok", text: `A link is on its way to ${u.email} (it works for an hour).` } : { kind: "bad", text: "The email could not be sent (too many in the last hour, or email is not set up)." });
+  accountAction("reset", async (s, u, req, reply, to) => {
+    const invite = invited(u);
+    // A new link replaces the earlier ones.
+    await d.db.query("UPDATE email_tokens SET used_at = now() WHERE user_id = $1 AND kind = 'reset' AND used_at IS NULL", [u.id]);
+    const sent = await h.mailLink(u.id, u.email, invite ? "invite" : "reset");
+    await audit(d.db, { actor: s.user.id, action: invite ? "user.invite_resent" : "user.reset_link", target: u.email, ip: req.ip });
+    return h.back(reply, to, sent
+      ? { kind: "ok", text: invite ? `A new invitation is on its way to ${u.email} (it works for 3 days).` : `A link is on its way to ${u.email} (it works for an hour).` }
+      : { kind: "bad", text: "The email could not be sent (too many in the last hour, or email is not set up: check Settings > Email)." });
   });
-  accountAction("totp-off", async (s, u, req, reply) => {
+  accountAction("email", async (s, u, req, reply) => {
+    const f = h.form(req);
+    const email = String(f.email ?? "").trim().toLowerCase();
+    const bad = (text: string) => h.back(reply, `/admin/users/${u.id}`, { kind: "bad", text }, { form: "user-email", values: f, errors: { email: text } });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return bad("That is not an email address.");
+    if (email === u.email.toLowerCase()) return h.back(reply, `/admin/users/${u.id}`, { kind: "ok", text: "Nothing changed." });
+    try {
+      await d.db.query("UPDATE users SET email = $2, email_verified_at = NULL WHERE id = $1", [u.id, email]);
+    } catch (e) {
+      if (isUnique(e)) return bad(`There is already an account for ${email}.`);
+      throw e;
+    }
+    // Links sent to the old address stop working.
+    await d.db.query("UPDATE email_tokens SET used_at = now() WHERE user_id = $1 AND used_at IS NULL", [u.id]);
+    await audit(d.db, { actor: s.user.id, action: "user.email", target: email, ip: req.ip, metadata: { from: u.email } });
+    void h.notify(u.email, "Your email address was changed", `An administrator changed the email address of your ${d.config.rootDomain} account to ${email}. Sign in with the new address from now on.`);
+    const sent = await h.mailLink(u.id, email, invited(u) ? "invite" : "verify");
+    return h.back(reply, `/admin/users/${u.id}`, { kind: sent ? "ok" : "bad", text: sent ? `The email is now ${email}. ${invited(u) ? "A new invitation" : "A link to confirm it"} is on its way.` : `The email is now ${email}, but the link could not be sent: check Settings > Email, then use "${invited(u) ? "Resend the invitation" : "Send a password link"}".` });
+  });
+  accountAction("totp-off", async (s, u, req, reply, to) => {
     await d.db.query("UPDATE users SET totp_secret_enc = NULL WHERE id = $1", [u.id]);
+    await d.db.query("DELETE FROM recovery_codes WHERE user_id = $1", [u.id]);
     await d.db.query("DELETE FROM sessions WHERE user_id = $1", [u.id]);
     await audit(d.db, { actor: s.user.id, action: "user.totp_off", target: u.email, ip: req.ip, metadata: { admin: true } });
     void h.notify(u.email, "Two-step sign-in was turned off", "An administrator turned off two-step sign-in for your account and signed you out everywhere. Turn it on again from Account & security.");
-    return h.back(reply, `/admin/users/${u.id}`, { kind: "ok", text: "Two-step sign-in is off and they are signed out everywhere." });
+    return h.back(reply, to, { kind: "ok", text: "Two-step sign-in is off and they are signed out everywhere." });
   }, true);
-  accountAction("signout", async (s, u, req, reply) => {
+  accountAction("signout", async (s, u, req, reply, to) => {
     const r = await d.db.query("DELETE FROM sessions WHERE user_id = $1", [u.id]);
     await audit(d.db, { actor: s.user.id, action: "user.sessions_end", target: u.email, ip: req.ip, metadata: { count: r.rowCount, admin: true } });
-    return h.back(reply, `/admin/users/${u.id}`, { kind: "ok", text: `Signed out of ${r.rowCount} device${r.rowCount === 1 ? "" : "s"}.` });
+    return h.back(reply, to, { kind: "ok", text: `Signed out of ${r.rowCount} device${r.rowCount === 1 ? "" : "s"}.` });
   });
   for (const [path, on] of [["suspend", true], ["unsuspend", false]] as const) {
-    accountAction(path, async (s, u, req, reply) => {
+    accountAction(path, async (s, u, req, reply, to) => {
       await subs.setUserSuspended(h.ctx(), h.actor(s, req), u.id, on);
-      return h.back(reply, `/admin/users/${u.id}`, { kind: "ok", text: on ? "Suspended, with their stations' DNS removed." : "Restored." });
+      return h.back(reply, to, { kind: "ok", text: on ? "Suspended, with their stations' DNS removed." : "Restored." });
     });
   }
   accountAction("delete", async (s, u, req, reply) => {
-    if (String(h.form(req).confirm ?? "").trim().toLowerCase() !== u.email.toLowerCase()) return h.back(reply, `/admin/users/${u.id}`, { kind: "bad", text: "Type the email exactly to delete." });
+    if (String(h.form(req).confirm ?? "").trim().toLowerCase() !== u.email.toLowerCase()) return h.back(reply, `/admin/users/${u.id}#delete-person`, { kind: "bad", text: "Type the email exactly to delete." });
     await subs.removeUser(h.ctx(), h.actor(s, req), u.id);
     return h.back(reply, "/admin/users", { kind: "ok", text: `${u.email} and their stations are deleted.` });
   }, true);
@@ -311,33 +396,34 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return h.render(req, reply, "Plans", html`${pageHead({ title: "Plans", sub: "A plan sets how many stations a person may have. Give a plan a price to sell it when payments are on.",
         actions: html`<a class="btn primary" href="/admin/plans/new">${icon("plus", 16)} New plan</a>` })}
       <div class="callout info">${icon("info")}<div><b>Who is on which plan</b><p>People without a plan are on the default plan${def ? html` (<b>${def.name}</b>)` : html`; there is none, so they may have ${stationWord(d.config.subdomainLimit)} (SUBDOMAIN_LIMIT)`}: ${unplanned} ${unplanned === 1 ? "person" : "people"}. A limit set on a person's page wins over any plan.</p></div></div>
-      ${panel({ flush: true }, all.length ? html`<div class="table-wrap"><table><tr><th>Plan</th><th class="num">Stations</th><th>Price</th><th class="num">People</th><th class="actions"></th></tr>${all.map((p) => html`<tr>
+      ${panel({ flush: true }, all.length ? table(["Plan", { text: "Stations", cls: "num" }, "Price", { text: "People", cls: "num" }, { text: "", cls: "actions" }], all.map((p) => html`<tr>
         <td><a href="/admin/plans/${p.id}"><b>${p.name}</b></a> ${p.is_default ? badge("accent", "Default") : ""}${p.description ? html`<span class="sub">${p.description}</span>` : ""}</td>
         <td class="num">${p.station_limit}</td><td>${p.price_minor ? badge("ok", priceText(p)) : badge("neutral", "Not for sale")}</td><td class="num">${p.people}</td>
-        <td class="actions"><a class="btn sm" href="/admin/plans/${p.id}">Edit</a></td></tr>`)}</table></div>`
+        <td class="actions">${menu([menuLink(`/admin/plans/${p.id}`, "Edit", "sliders"), p.is_default ? "" : menuLink(`/admin/plans/${p.id}#delete-plan`, "Delete…", "alert")], { aria: `Actions for ${p.name}` })}</td></tr>`))
         : emptyState("No plans yet", "Create a plan to give people more stations, or to sell more.", html`<a class="btn primary" href="/admin/plans/new">New plan</a>`))}`, h.takeFlash(req, reply));
   });
 
-  const planForm = (s: Session, p: PlanRow | null) => {
+  const planForm = (s: Session, p: PlanRow | null, fs: FormState) => {
     const price = p?.price_minor && p.currency ? (Number(p.price_minor) / 10 ** exponent(p.currency)).toFixed(exponent(p.currency)) : "";
+    const currency = fs.v("currency", p?.currency ?? "USD");
     return html`<form method="post" action="${p ? `/admin/plans/${p.id}` : "/admin/plans"}">${csrfField(s.csrf)}${panel({}, html`
       ${formSection("Plan", "What people see, and how many stations it allows.", html`
-        ${field({ id: "name", label: "Name", control: html`<input id="name" name="name" value="${p?.name ?? ""}" required maxlength="60" placeholder="Pro">` })}
-        ${field({ id: "description", label: "Description (optional)", control: html`<input id="description" name="description" value="${p?.description ?? ""}" maxlength="200" placeholder="For networks with several studios">` })}
-        ${field({ id: "limit", label: "Stations allowed", control: html`<input id="limit" type="number" name="limit" value="${p?.station_limit ?? ""}" min="0" max="10000" required class="w-sm">` })}
-        <label class="check"><input type="checkbox" name="default" value="1"${p?.is_default ? " checked" : ""}><span><b>Default plan</b><br><span class="dim">Everyone without a plan is on this one. There is one default.</span></span></label>`)}
+        ${field({ id: "name", label: "Name", error: fs.e("name"), control: html`<input id="name" name="name" value="${fs.v("name", p?.name)}" required maxlength="60" placeholder="Pro">` })}
+        ${field({ id: "description", label: "Description (optional)", control: html`<input id="description" name="description" value="${fs.v("description", p?.description)}" maxlength="200" placeholder="For networks with several studios">` })}
+        ${field({ id: "limit", label: "Stations allowed", error: fs.e("limit"), control: html`<input id="limit" type="number" name="limit" value="${fs.v("limit", p?.station_limit)}" min="0" max="10000" required class="w-sm">` })}
+        <label class="check"><input type="checkbox" name="default" value="1"${(fs.returned ? fs.v("default") === "1" : p?.is_default) ? " checked" : ""}><span><b>Default plan</b><br><span class="dim">Everyone without a plan is on this one. There is one default.</span></span></label>`)}
       ${formSection("Price", "Leave the price empty to keep the plan out of the shop: admins can still assign it. A change applies to new payments only.", html`
         <div class="form-grid">
-          ${field({ id: "price", label: "Price", control: html`<input id="price" name="price" value="${price}" inputmode="decimal" placeholder="19.99">` })}
-          ${field({ id: "currency", label: "Currency", control: html`<select id="currency" name="currency">${CURRENCIES.map((c) => html`<option${(p?.currency ?? "USD") === c ? " selected" : ""}>${c}</option>`)}</select>` })}
-          ${field({ id: "period", label: "Each payment covers", control: html`<select id="period" name="period"><option value="month"${p?.period !== "year" ? " selected" : ""}>1 month</option><option value="year"${p?.period === "year" ? " selected" : ""}>1 year</option></select>` })}</div>`)}`,
+          ${field({ id: "price", label: "Price", error: fs.e("price"), control: html`<input id="price" name="price" value="${fs.v("price", price)}" inputmode="decimal" placeholder="19.99">` })}
+          ${field({ id: "currency", label: "Currency", control: html`<select id="currency" name="currency">${CURRENCIES.map((c) => html`<option${currency === c ? " selected" : ""}>${c}</option>`)}</select>` })}</div>
+        ${segmented({ name: "period", label: "Each payment covers", selected: fs.v("period", p?.period ?? "month"), options: [["month", "1 month"], ["year", "1 year"]] })}`)}`,
       html`<a class="btn ghost" href="/admin/plans">Cancel</a><button class="primary">${p ? "Save plan" : "Create plan"}</button>`)}</form>`;
   };
 
   app.get("/admin/plans/new", async (req, reply) => {
     const s = admin(req, reply, "plans.manage");
     if (!s) return reply;
-    return h.render(req, reply, "New plan", html`${pageHead({ title: "New plan", back: { href: "/admin/plans", text: "Plans" } })}${planForm(s, null)}`, h.takeFlash(req, reply));
+    return h.render(req, reply, "New plan", html`${pageHead({ title: "New plan", back: { href: "/admin/plans", text: "Plans" } })}${planForm(s, null, h.takeForm(req, reply).for("plan"))}`, h.takeFlash(req, reply));
   });
   app.get("/admin/plans/:id", async (req, reply) => {
     const s = admin(req, reply, "plans.manage");
@@ -345,26 +431,29 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const p = (await plans()).find((x) => x.id === idOf(req));
     if (!p) return h.render(req, reply, "Not found", html`${pageHead({ title: "No such plan", back: { href: "/admin/plans", text: "Plans" } })}`, null, 404);
     return h.render(req, reply, p.name, html`${pageHead({ title: p.name, back: { href: "/admin/plans", text: "Plans" }, meta: html`${p.is_default ? badge("accent", "Default") : ""}${badge(p.price_minor ? "ok" : "neutral", priceText(p))}<span>${p.people} ${p.people === 1 ? "person" : "people"}</span>` })}
-      ${planForm(s, p)}
-      ${panel({ title: "Delete plan", tone: "danger", sub: `Its ${p.people} ${p.people === 1 ? "person moves" : "people move"} to the default plan. Past payments stay in the records.` },
-        html`<form method="post" action="/admin/plans/${p.id}/delete" data-confirm="Delete the ${p.name} plan?">${csrfField(s.csrf)}<button class="danger">Delete plan</button></form>`)}`, h.takeFlash(req, reply));
+      ${planForm(s, p, h.takeForm(req, reply).for("plan"))}
+      ${panel({ title: "Delete plan", tone: "danger", sub: p.is_default ? "The default plan cannot be deleted: make another plan the default first." : `Its ${p.people} ${p.people === 1 ? "person moves" : "people move"} to the default plan. Past payments stay in the records.` },
+        p.is_default ? html`<button class="danger" disabled>Delete plan</button>` : opener("delete-plan", "Delete plan…", "danger"))}
+      ${p.is_default ? "" : modal({ id: "delete-plan", title: `Delete the ${p.name} plan`, tone: "danger", action: `/admin/plans/${p.id}/delete`, csrf: s.csrf, submit: "Delete plan",
+        text: html`<p>${p.people ? html`<b>${p.people} ${p.people === 1 ? "person moves" : "people move"}</b> to the default plan; stations they already have stay.` : "Nobody is on this plan."} Past payments stay in the records.</p>` })}`, h.takeFlash(req, reply));
   });
 
   /** Create (id null) or change a plan. */
   async function savePlan(req: FastifyRequest, reply: FastifyReply, s: Session, id: number | null) {
     const f = h.form(req);
     const here = id === null ? "/admin/plans/new" : `/admin/plans/${id}`;
+    const bad = (field: string, text: string) => h.back(reply, here, { kind: "bad", text }, { form: "plan", values: f, errors: { [field]: text } });
     const name = String(f.name ?? "").trim().replace(/\s+/g, " ");
     const description = String(f.description ?? "").trim().slice(0, 200) || null;
     const raw = String(f.limit ?? "").trim();
-    if (!name || name.length > 60) return h.back(reply, here, { kind: "bad", text: "A plan needs a name (60 characters at most)." });
-    if (!/^\d{1,5}$/.test(raw)) return h.back(reply, here, { kind: "bad", text: "The number of stations is a whole number." });
+    if (!name || name.length > 60) return bad("name", "A plan needs a name (60 characters at most).");
+    if (!/^\d{1,5}$/.test(raw) || Number(raw) > 10000) return bad("limit", "The number of stations is a whole number from 0 to 10000.");
     const currency = CURRENCIES.includes(String(f.currency)) ? String(f.currency) : "USD";
     const period = f.period === "year" ? "year" : "month";
     let price: number | null = null;
     if (String(f.price ?? "").trim()) {
       price = toMinor(String(f.price), currency);
-      if (price === null) return h.back(reply, here, { kind: "bad", text: exponent(currency) ? "Write the price like 19.99." : `Write the price as a whole number (${currency} has no cents).` });
+      if (price === null) return bad("price", exponent(currency) ? "Write the price like 19.99." : `Write the price as a whole number (${currency} has no cents).`);
     }
     const makeDefault = f.default === "1";
     try {
@@ -380,7 +469,7 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
           metadata: { limit: Number(raw), default: makeDefault, price: price === null ? null : formatMoney(price, currency), period } });
       });
     } catch (e) {
-      if (isUnique(e)) return h.back(reply, here, { kind: "bad", text: `There is already a plan called ${name}.` });
+      if (isUnique(e)) return bad("name", `There is already a plan called ${name}.`);
       if (e instanceof subs.SubdomainError) return h.back(reply, "/admin/plans", { kind: "bad", text: e.message });
       throw e;
     }
@@ -400,8 +489,11 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   app.post("/admin/plans/:id/delete", async (req, reply) => {
     const s = admin(req, reply, "plans.manage");
     if (!s) return reply;
-    const r = await d.db.query<{ name: string }>("DELETE FROM plans WHERE id = $1 RETURNING name", [idOf(req)]);
-    if (!r.rows[0]) return h.back(reply, "/admin/plans", { kind: "bad", text: "That plan no longer exists." });
+    const r = await d.db.query<{ name: string }>("DELETE FROM plans WHERE id = $1 AND NOT is_default RETURNING name", [idOf(req)]);
+    if (!r.rows[0]) {
+      const def = (await d.db.query("SELECT 1 FROM plans WHERE id = $1 AND is_default", [idOf(req)])).rowCount;
+      return h.back(reply, def ? `/admin/plans/${idOf(req)}` : "/admin/plans", { kind: "bad", text: def ? "The default plan cannot be deleted: make another plan the default first." : "That plan no longer exists." });
+    }
     await audit(d.db, { actor: s.user.id, action: "plan.delete", target: r.rows[0].name, ip: req.ip });
     return h.back(reply, "/admin/plans", { kind: "ok", text: `${r.rows[0].name} is deleted; its people are on the default plan.` });
   });
