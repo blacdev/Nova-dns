@@ -20,7 +20,7 @@ import * as subs from "../lib/subdomains.js";
 import { adminGuard } from "./admin.js";
 import type { DashDeps, Helpers } from "./app.js";
 import { paymentBadge, statusChip } from "./app.js";
-import { badge, csrfField, day, emptyState, facts, field, formSection, html, icon, pageHead, panel, when, type Html } from "./html.js";
+import { badge, csrfField, day, emptyState, field, html, icon, pageHead, panel, when } from "./html.js";
 import { choiceCards, FormState, segmented, filterBar, like, menu, menuLink, menuOpen, menuPost, menuSep, modal, opener, pageOf, paged, pager, table, withQuery } from "./ui.js";
 import type { Session } from "./session.js";
 
@@ -190,27 +190,23 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const a = await allowance(d.db, u.id, d.config.subdomainLimit);
     const stations = (await d.db.query(
       "SELECT sd.id, sd.label, sd.status, st.last_seen_at FROM subdomains sd JOIN studios st ON st.subdomain_id = sd.id WHERE sd.user_id = $1 ORDER BY sd.label", [u.id])).rows;
-    const payments = can(s.user, "billing.manage") ? (await d.db.query("SELECT id, plan_name, amount_minor, currency, status, created_at FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10", [u.id])).rows : [];
-    const paymentCount = payments.length === 10 ? Number((await d.db.query("SELECT count(*) AS n FROM payments WHERE user_id = $1", [u.id])).rows[0].n) : payments.length;
+    const payments = can(s.user, "billing.manage") ? (await d.db.query("SELECT id, plan_name, amount_minor, currency, status, created_at FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5", [u.id])).rows : [];
+    const paymentCount = payments.length === 5 ? Number((await d.db.query("SELECT count(*) AS n FROM payments WHERE user_id = $1", [u.id])).rows[0].n) : payments.length;
     const act = mayActOn(s.user, u);
     const manage = can(s.user, "users.manage") && act;
     const editPlan = can(s.user, "users.manage") && (act || (isSuper(s.user) && u.id === s.user.id));
     const forms = h.takeForm(req, reply);
     const stationForm = forms.for("user-station");
     const sudoNext = (hash = "") => `/sudo?next=${encodeURIComponent(`/admin/users/${u.id}${hash}`)}`;
-    const sudoLink = html`<a class="btn" href="${sudoNext()}">${icon("lock", 15)} Confirm it is you to continue</a>`;
     const base = `/admin/users/${u.id}`;
 
-    let roles: Html | string = "";
-    if (isSuper(s.user) && u.id !== s.user.id) {
-      roles = panel({ title: "Role and permissions", sub: "Only you, the super admin, change these. An admin may do only what is ticked." }, s.elevated ? html`
-        <form method="post" action="/admin/users/${u.id}/role">${csrfField(s.csrf)}
-          ${roleCards(u.role === "admin" ? "admin" : "user", "role")}
-          <div class="checks-grid">${ALL_PERMISSIONS.map((p) => html`<label class="check"><input type="checkbox" name="perm" value="${p}"${u.permissions.includes(p) ? " checked" : ""}><span><b>${p}</b><br><span class="dim">${PERMISSIONS[p]}</span></span></label>`)}</div>
-          <div class="row"><button class="primary">Save role</button><span class="dim small">Ticks are ignored for a station owner.</span></div></form>
-        ${u.role === "admin" && u.status === "active" ? html`<div class="callout" style="margin:24px 0 0">${icon("key")}<div><b>Hand over the super admin role</b><p>There is one super admin. ${u.email} takes over; you become an admin with every permission.</p></div>
-          <form method="post" action="/admin/users/${u.id}/superadmin" data-confirm="Hand the super admin role to ${u.email}? You become an admin, and cannot undo this yourself." data-confirm-title="Hand over the super admin role" style="margin-left:auto">${csrfField(s.csrf)}<button class="danger">Make super admin</button></form></div>` : ""}` : html`<p class="dim">Changing roles needs your identity confirmed again.</p>${sudoLink}`);
-    }
+    const superOther = isSuper(s.user) && u.id !== s.user.id;
+    const handOver = superOther && u.role === "admin" && u.status === "active";
+    const roleDialog = superOther && s.elevated ? modal({ id: "edit-role", wide: true, title: `Role of ${u.email}`, action: `${base}/role`, csrf: s.csrf, submit: "Save role",
+      text: "Only you, the super admin, change these. An admin may do only what is ticked; ticks are ignored for a station owner.",
+      body: html`${roleCards(u.role === "admin" ? "admin" : "user", "role")}
+        <span class="label">Permissions</span><div class="checks-grid">${ALL_PERMISSIONS.map((p) => html`<label class="check"><input type="checkbox" name="perm" value="${p}"${u.permissions.includes(p) ? " checked" : ""}><span><b>${p}</b><br><span class="dim">${PERMISSIONS[p]}</span></span></label>`)}</div>` }) : "";
+    const editRole = !superOther ? "" : s.elevated ? opener("edit-role", "Edit role", "sm") : html`<a class="btn sm" href="${sudoNext("#edit-role")}">${icon("lock", 14)} Edit role</a>`;
 
     const actions = manage ? menu([
       menuOpen("change-email", "Change email…", { ic: "user" }),
@@ -218,39 +214,39 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
       menuPost(`${base}/reset`, invited(u) ? "Resend the invitation" : "Send a password link", s.csrf, { confirm: invited(u) ? `Send ${u.email} a new invitation? It works for 3 days; the earlier link stops working.` : `Email ${u.email} a link to choose a new password? It works for an hour.`, title: invited(u) ? "Resend the invitation" : "Send a password link", ic: "key" }),
       u.totp ? menuPost(`${base}/totp-off`, "Turn off two-step sign-in", s.csrf, { confirm: `Turn off ${u.email}'s two-step sign-in and sign them out everywhere? Do this only once you know it is them.`, title: "Turn off two-step sign-in", danger: true, ic: "shield" }) : "",
       menuPost(`${base}/signout`, "Sign out everywhere", s.csrf, { confirm: `Sign ${u.email} out of every device?`, title: "Sign out everywhere", ic: "logout" }),
+      handOver ? menuPost(`${base}/superadmin`, "Make super admin", s.csrf, { confirm: `${u.email} becomes the super admin; you become an admin with every permission, and cannot undo this yourself.`, title: "Hand over the super admin role", danger: true, ic: "key" }) : "",
       menuSep(),
       u.status === "active"
         ? menuPost(`${base}/suspend`, "Suspend account", s.csrf, { confirm: `Suspend ${u.email}? They are signed out and their stations stop resolving.`, title: "Suspend account", danger: true, ic: "lock" })
         : menuPost(`${base}/unsuspend`, "Restore account", s.csrf, { confirm: `Restore ${u.email} and their stations?`, title: "Restore account", ic: "check" }),
       s.elevated ? menuOpen("delete-person", "Delete…", { danger: true, ic: "alert" }) : menuLink(sudoNext("#delete-person"), "Delete… (confirm it is you first)", "alert"),
     ], { label: "Actions" }) : "";
+    const planForm = forms.for("user-plan");
 
     return h.render(req, reply, u.email, html`${pageHead({ title: u.email, back: { href: "/admin/users", text: "People" }, actions,
         meta: html`${roleBadge(u.role)}${u.status === "active" ? badge("ok", "Active") : badge("bad", "Suspended")}${u.email_verified_at ? badge("ok", "Email confirmed") : badge("warn", "Email not confirmed")}${u.totp ? badge("ok", "2FA on") : badge("neutral", "2FA off")}${invited(u) ? badge("info", `Invited ${day(u.invited_at)}`) : u.last_login_at ? "" : badge("neutral", "Never signed in")}` })}
       ${!act && u.id !== s.user.id ? html`<div class="callout info">${icon("info")}<div><p>Only the super admin may change ${u.role === "superadmin" ? "the super admin's" : "an admin's"} account.</p></div></div>` : ""}
       ${u.id === s.user.id ? html`<div class="callout info">${icon("info")}<div><p>This is you. Change your own account on <a href="/account">Account &amp; security</a>.</p></div></div>` : ""}
-      <div class="split"><div>
-      ${panel({ title: "Details" }, facts([
-        ["Role", u.role === "admin" ? html`Admin <span class="sub dim small">${u.permissions.length ? u.permissions.join(", ") : "No permissions"}</span>` : roleName(u.role)],
-        ["Plan", html`${a.custom ? "Own limit" : a.plan || "None (SUBDOMAIN_LIMIT)"}${a.expiresAt ? html` <span class="dim">· paid until ${day(a.expiresAt)}</span>` : ""}${a.lapsed ? html` <span class="dim">· ${a.lapsed} ended</span>` : ""}`],
-        ["Stations", `${stations.length} of ${a.limit}`],
-        ["Joined", day(u.created_at)],
-        ["Last sign-in", when(u.last_login_at)],
-      ]))}
-      ${editPlan ? panel({ title: "Plan and limit", sub: "Their own limit wins over any plan. Choosing a plan here has no end date." }, html`
-        <form method="post" action="/admin/users/${u.id}/plan">${csrfField(s.csrf)}<div class="form-grid">
-          ${field({ id: "plan", label: "Plan", control: planPicker(all, u.plan_id) })}
-          ${field({ id: "limit", label: "Own station limit", help: "Leave empty to follow the plan.", error: forms.for("user-plan").e("limit"), control: html`<input id="limit" type="number" name="limit" min="0" max="10000" value="${forms.for("user-plan").v("limit", u.station_limit_override ?? "")}">` })}</div>
-          <div class="row"><button class="primary">Save</button>${can(s.user, "plans.manage") ? html`<a class="btn ghost" href="/admin/plans">Manage plans</a>` : ""}</div></form>`) : ""}
-      ${roles}
+      <div class="grid2"><div>
+      ${panel({ title: "Details", actions: editRole }, html`<dl class="kv">
+        <dt>Role</dt><dd>${u.role === "admin" ? html`Admin <span class="sub dim small">${u.permissions.length ? u.permissions.join(", ") : "No permissions yet"}</span>` : roleName(u.role)}</dd>
+        <dt>Plan</dt><dd>${a.custom ? "Own limit" : a.plan || "None (SUBDOMAIN_LIMIT)"}${a.expiresAt ? html` <span class="dim">· paid until ${day(a.expiresAt)}</span>` : ""}${a.lapsed ? html` <span class="dim">· ${a.lapsed} ended</span>` : ""}</dd>
+        <dt>Stations</dt><dd>${stations.length} of ${a.limit}</dd>
+        <dt>Joined</dt><dd>${day(u.created_at)}${invited(u) ? " (invited by an admin)" : ""}</dd>
+        <dt>Last sign-in</dt><dd>${when(u.last_login_at)}</dd></dl>`,
+        editPlan ? html`<form method="post" action="/admin/users/${u.id}/plan" class="row tight" style="width:100%;align-items:flex-end;flex-wrap:wrap">${csrfField(s.csrf)}
+          <div class="field" style="flex:1;min-width:180px;margin:0"><label for="plan">Plan</label>${planPicker(all, u.plan_id)}</div>
+          <div class="field${planForm.e("limit") ? " has-error" : ""}" style="width:150px;margin:0"><label for="limit">Own limit</label><input id="limit" type="number" name="limit" min="0" max="10000" placeholder="From the plan" value="${planForm.v("limit", u.station_limit_override ?? "")}"></div>
+          <button class="primary">Save</button>${planForm.e("limit") ? html`<p class="field-error" style="width:100%">${planForm.e("limit")}</p>` : ""}</form>` : "")}
+      ${payments.length ? panel({ title: "Payments", flush: true, actions: paymentCount > payments.length ? html`<a class="btn sm" href="/admin/billing/payments?q=${encodeURIComponent(u.email)}">All ${paymentCount}</a>` : "" },
+        table(["Date", "Plan", { text: "Amount", cls: "num" }, "Status"], payments.map((p) => html`<tr><td style="white-space:nowrap"><a href="/admin/billing/payments/${p.id}">${day(p.created_at)}</a></td><td>${p.plan_name}</td><td class="num">${formatMoney(Number(p.amount_minor), p.currency)}</td><td>${paymentBadge(p.status)}</td></tr>`), { fit: false })) : ""}
       </div><div>
       ${panel({ title: "Stations", flush: true }, html`${stations.length ? table(["Address", "Status", { text: "", cls: "actions" }], stations.map((r) => html`<tr><td><b>${fqdnOf(r.label, d.config.rootDomain)}</b></td><td>${statusChip(r.status, r.last_seen_at)}</td>
           <td class="actions">${can(s.user, "stations.view") ? html`<a class="btn sm" href="/stations/${r.id}">Open</a>` : ""}</td></tr>`)) : html`<div class="card-body"><p class="dim" style="margin:0">No stations.</p></div>`}
         ${can(s.user, "stations.manage") ? html`<div class="card-body" style="border-top:1px solid var(--line)"><form method="post" action="/admin/stations">${csrfField(s.csrf)}<input type="hidden" name="email" value="${u.email}"><input type="hidden" name="back" value="user">
           ${field({ id: "label", label: "Create a station for them", error: stationForm.e("label"), control: html`<div class="row tight"><div class="input-group" style="flex:1;min-width:200px"><input id="label" name="label" placeholder="kfm" required maxlength="63" autocomplete="off" spellcheck="false" value="${stationForm.v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><button>Create</button></div>` })}</form></div>` : ""}`)}
-      ${payments.length ? panel({ title: "Payments", flush: true, actions: paymentCount > payments.length ? html`<a class="btn sm" href="/admin/billing?q=${encodeURIComponent(u.email)}">All ${paymentCount}</a>` : "" },
-        table(["Date", "Plan", { text: "Amount", cls: "num" }, "Status"], payments.map((p) => html`<tr><td style="white-space:nowrap"><a href="/admin/billing/payments/${p.id}">${day(p.created_at)}</a></td><td>${p.plan_name}</td><td class="num">${formatMoney(Number(p.amount_minor), p.currency)}</td><td>${paymentBadge(p.status)}</td></tr>`))) : ""}
       </div></div>
+      ${roleDialog}
       ${manage ? modal({ id: "change-email", title: "Change email", action: `${base}/email`, csrf: s.csrf, submit: "Change email", open: forms.for("user-email").returned,
         text: html`<p>${invited(u) ? "A new invitation goes to the new address." : "The new address must be confirmed: a link goes to it."} ${u.email} is told about the change.</p>`,
         body: field({ id: "new-email", label: "New email", error: forms.for("user-email").e("email"), control: html`<input id="new-email" name="email" type="email" required autocomplete="off" maxlength="254" value="${forms.for("user-email").v("email", u.email)}">` }) }) : ""}
@@ -406,17 +402,19 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   const planForm = (s: Session, p: PlanRow | null, fs: FormState) => {
     const price = p?.price_minor && p.currency ? (Number(p.price_minor) / 10 ** exponent(p.currency)).toFixed(exponent(p.currency)) : "";
     const currency = fs.v("currency", p?.currency ?? "USD");
-    return html`<form method="post" action="${p ? `/admin/plans/${p.id}` : "/admin/plans"}">${csrfField(s.csrf)}${panel({}, html`
-      ${formSection("Plan", "What people see, and how many stations it allows.", html`
+    return html`<form method="post" action="${p ? `/admin/plans/${p.id}` : "/admin/plans"}">${csrfField(s.csrf)}${panel({}, html`<div class="blocks">
+      <div class="block"><h3>Plan</h3><p class="dim">What people see, and how many stations it allows.</p>
+        <div class="form-grid" style="grid-template-columns:minmax(0,1fr) 140px">
         ${field({ id: "name", label: "Name", error: fs.e("name"), control: html`<input id="name" name="name" value="${fs.v("name", p?.name)}" required maxlength="60" placeholder="Pro">` })}
+        ${field({ id: "limit", label: "Stations allowed", error: fs.e("limit"), control: html`<input id="limit" type="number" name="limit" value="${fs.v("limit", p?.station_limit)}" min="0" max="10000" required>` })}</div>
         ${field({ id: "description", label: "Description (optional)", control: html`<input id="description" name="description" value="${fs.v("description", p?.description)}" maxlength="200" placeholder="For networks with several studios">` })}
-        ${field({ id: "limit", label: "Stations allowed", error: fs.e("limit"), control: html`<input id="limit" type="number" name="limit" value="${fs.v("limit", p?.station_limit)}" min="0" max="10000" required class="w-sm">` })}
-        <label class="check"><input type="checkbox" name="default" value="1"${(fs.returned ? fs.v("default") === "1" : p?.is_default) ? " checked" : ""}><span><b>Default plan</b><br><span class="dim">Everyone without a plan is on this one. There is one default.</span></span></label>`)}
-      ${formSection("Price", "Leave the price empty to keep the plan out of the shop: admins can still assign it. A change applies to new payments only.", html`
+        <label class="check"><input type="checkbox" name="default" value="1"${(fs.returned ? fs.v("default") === "1" : p?.is_default) ? " checked" : ""}><span><b>Default plan</b><br><span class="dim">Everyone without a plan is on this one. There is one default.</span></span></label></div>
+      <div class="block"><h3>Price</h3><p class="dim">Leave the price empty to keep the plan out of the shop: admins can still assign it. A change applies to new payments only.</p>
         <div class="form-grid">
           ${field({ id: "price", label: "Price", error: fs.e("price"), control: html`<input id="price" name="price" value="${fs.v("price", price)}" inputmode="decimal" placeholder="19.99">` })}
           ${field({ id: "currency", label: "Currency", control: html`<select id="currency" name="currency">${CURRENCIES.map((c) => html`<option${currency === c ? " selected" : ""}>${c}</option>`)}</select>` })}</div>
-        ${segmented({ name: "period", label: "Each payment covers", selected: fs.v("period", p?.period ?? "month"), options: [["month", "1 month"], ["year", "1 year"]] })}`)}`,
+        ${segmented({ name: "period", label: "Each payment covers", selected: fs.v("period", p?.period ?? "month"), options: [["month", "1 month"], ["year", "1 year"]] })}</div>
+      </div>`,
       html`<a class="btn ghost" href="/admin/plans">Cancel</a><button class="primary">${p ? "Save plan" : "Create plan"}</button>`)}</form>`;
   };
 
@@ -430,10 +428,10 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     if (!s) return reply;
     const p = (await plans()).find((x) => x.id === idOf(req));
     if (!p) return h.render(req, reply, "Not found", html`${pageHead({ title: "No such plan", back: { href: "/admin/plans", text: "Plans" } })}`, null, 404);
-    return h.render(req, reply, p.name, html`${pageHead({ title: p.name, back: { href: "/admin/plans", text: "Plans" }, meta: html`${p.is_default ? badge("accent", "Default") : ""}${badge(p.price_minor ? "ok" : "neutral", priceText(p))}<span>${p.people} ${p.people === 1 ? "person" : "people"}</span>` })}
+    return h.render(req, reply, p.name, html`${pageHead({ title: p.name, back: { href: "/admin/plans", text: "Plans" },
+        actions: p.is_default ? html`<button class="danger" disabled title="Make another plan the default first">Delete plan</button>` : opener("delete-plan", "Delete plan…", "danger"),
+        meta: html`${p.is_default ? badge("accent", "Default") : ""}${badge(p.price_minor ? "ok" : "neutral", priceText(p))}<span>${p.people} ${p.people === 1 ? "person" : "people"}</span>${p.is_default ? html`<span class="dim">The default plan cannot be deleted; make another plan the default first.</span>` : ""}` })}
       ${planForm(s, p, h.takeForm(req, reply).for("plan"))}
-      ${panel({ title: "Delete plan", tone: "danger", sub: p.is_default ? "The default plan cannot be deleted: make another plan the default first." : `Its ${p.people} ${p.people === 1 ? "person moves" : "people move"} to the default plan. Past payments stay in the records.` },
-        p.is_default ? html`<button class="danger" disabled>Delete plan</button>` : opener("delete-plan", "Delete plan…", "danger"))}
       ${p.is_default ? "" : modal({ id: "delete-plan", title: `Delete the ${p.name} plan`, tone: "danger", action: `/admin/plans/${p.id}/delete`, csrf: s.csrf, submit: "Delete plan",
         text: html`<p>${p.people ? html`<b>${p.people} ${p.people === 1 ? "person moves" : "people move"}</b> to the default plan; stations they already have stay.` : "Nobody is on this plan."} Past payments stay in the records.</p>` })}`, h.takeFlash(req, reply));
   });

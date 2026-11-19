@@ -45,8 +45,13 @@ export class FormState {
 
 export type Col = string | { text: string; cls?: string };
 
-export function table(cols: Col[], rows: (Html | string)[] | Html, o: { cls?: string } = {}): Html {
-  return html`<div class="table-wrap"><table${o.cls ? raw(` class="${escape(o.cls)}"`) : ""}><thead><tr>${cols.map((c) => typeof c === "string"
+/**
+ * A table. `fit` (the default): a list that can grow; it takes the height left on the screen and scrolls
+ * inside its card (its header stays), so the page itself does not grow with it.
+ */
+export function table(cols: Col[], rows: (Html | string)[] | Html, o: { cls?: string; fit?: boolean } = {}): Html {
+  const fit = o.fit ?? true;
+  return html`<div class="table-wrap${fit ? " fit" : ""}"${fit ? raw(" data-fit") : ""}><table${o.cls ? raw(` class="${escape(o.cls)}"`) : ""}><thead><tr>${cols.map((c) => typeof c === "string"
     ? html`<th scope="col">${c}</th>`
     : html`<th scope="col" class="${c.cls ?? ""}">${c.text}</th>`)}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -71,11 +76,13 @@ export interface ModalOptions {
   /** Open on page load (the form came back with an error). */
   open?: boolean;
   error?: string;
+  /** For dialogs with more fields (permissions). */
+  wide?: boolean;
 }
 
 export function modal(o: ModalOptions): Html {
   const typedId = `${o.id}-confirm`;
-  return html`<dialog class="modal" id="${o.id}" aria-labelledby="${o.id}-title"${o.open ? raw(" data-open-now") : ""}>
+  return html`<dialog class="modal${o.wide ? " wide" : ""}" id="${o.id}" aria-labelledby="${o.id}-title"${o.open ? raw(" data-open-now") : ""}>
     <form method="post" action="${o.action}">${csrfField(o.csrf)}${Object.entries(o.hidden ?? {}).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
       <header class="modal-head"><h2 id="${o.id}-title">${o.title}</h2><button type="button" class="icon-btn close" data-close aria-label="Close">${raw("&times;")}</button></header>
       <div class="modal-body">${o.text ? html`<div class="modal-text">${o.text}</div>` : ""}${o.error ? html`<p class="field-error" role="alert">${o.error}</p>` : ""}${o.body ?? ""}
@@ -86,6 +93,13 @@ export function modal(o: ModalOptions): Html {
 
 /** A button that opens dialog `id`. */
 export const opener = (id: string, label: Html | string, cls = "") => html`<button type="button" class="${cls}" data-open="${id}" aria-haspopup="dialog">${label}</button>`;
+
+// ---------------------------------------------------------------- tabs
+
+/** Sections of one page, as links: [href, label, count?]. */
+export function tabs(items: { href: string; label: string; count?: number | string; current: boolean }[], label = "Sections"): Html {
+  return html`<nav class="tabbar" aria-label="${label}">${items.map((t) => html`<a class="tab" href="${t.href}"${t.current ? raw(' aria-current="page"') : ""}>${t.label}${t.count !== undefined ? html`<span class="count">${t.count}</span>` : ""}</a>`)}</nav>`;
+}
 
 // ---------------------------------------------------------------- menus
 
@@ -223,10 +237,10 @@ export interface Choice {
 }
 
 /** Radio buttons as cards: for two to four options people should see side by side. */
-export function choiceCards(o: { name: string; label: string; options: Choice[]; selected: string; id?: string; error?: string; help?: Html | string }): Html {
+export function choiceCards(o: { name: string; label: string; options: Choice[]; selected: string; id?: string; error?: string; help?: Html | string; aside?: Html | string; cls?: string }): Html {
   const id = o.id ?? o.name;
-  return html`<div class="field${o.error ? " has-error" : ""}"><span class="label" id="${id}-label">${o.label}</span>
-    <div class="options" role="radiogroup" aria-labelledby="${id}-label">${o.options.map((c) => html`<label class="option"><input type="radio" name="${o.name}" value="${c.value}"${c.value === o.selected ? " checked" : ""}${c.attrs ? raw(` ${c.attrs}`) : ""}>
+  return html`<div class="field${o.error ? " has-error" : ""}"><span class="label" id="${id}-label">${o.label}</span>${o.aside ?? ""}
+    <div class="options${o.cls ? ` ${o.cls}` : ""}" role="radiogroup" aria-labelledby="${id}-label">${o.options.map((c) => html`<label class="option"><input type="radio" name="${o.name}" value="${c.value}"${c.value === o.selected ? " checked" : ""}${c.attrs ? raw(` ${c.attrs}`) : ""}>
       ${c.badge ?? ""}<b>${c.title}</b>${c.text ? html`<span>${c.text}</span>` : ""}</label>`)}</div>
     ${o.error ? html`<p class="field-error">${o.error}</p>` : ""}${o.help ? html`<p class="help">${o.help}</p>` : ""}</div>`;
 }

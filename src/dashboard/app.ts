@@ -461,49 +461,51 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const sudo = (hash: string) => `/sudo?next=${encodeURIComponent(`/account${hash}`)}`;
     const staff = isStaff(s.user);
     const superadmin = s.user.role === "superadmin";
+    const pw = fs.for("password");
+    const off = fs.for("totp-off");
     let totp: Html;
     if (s.user.totp) {
-      totp = html`<div class="switch-row"><div>${badge("ok", "On")} <span class="dim">Signing in asks for a code from your authenticator app.</span></div></div>
+      totp = html`<div class="switch-row"><div>${badge("ok", "On")} <span class="dim">Signing in asks for a code from your authenticator app.</span></div>
+          ${opener("totp-off", "Turn off…", "sm danger")}</div>
         <div class="callout${codesLeft <= 2 ? " warn" : ""}" style="margin:16px 0 0">${icon("key")}<div><b>Recovery codes: ${codesLeft} left</b><p>${codesLeft ? "Each signs you in once if you lose your phone." : "You have none: make a set now, in case you lose your phone."}</p></div>
-          <form method="post" action="/account/recovery-codes" style="margin-left:auto"${codesLeft ? html` data-confirm="Your ${codesLeft} unused recovery code${codesLeft === 1 ? "" : "s"} will stop working." data-confirm-title="Make new recovery codes?" data-confirm-ok="Make new codes"` : ""}>${csrfField(s.csrf)}<button class="sm">${codesLeft ? "Make new codes" : "Make recovery codes"}</button></form></div>
-        <form method="post" action="/account/totp/disable" style="margin-top:20px" data-confirm="${staff ? "Without it the admin console closes to you. " : ""}Signing in will need only your password." data-confirm-title="Turn off two-step sign-in?" data-danger>${csrfField(s.csrf)}
-          ${field({ id: "off", label: "Current code (or a recovery code), to turn it off", error: fs.for("totp-off").e("code"), help: staff ? "Admins need two-step sign-in: without it the admin console is closed to you." : "", control: codeInput("off", 'class="w-sm"') })}
-          <div class="row"><button class="danger">Turn off two-step sign-in</button></div></form>`;
+          <form method="post" action="/account/recovery-codes" style="margin-left:auto"${codesLeft ? html` data-confirm="Your ${codesLeft} unused recovery code${codesLeft === 1 ? "" : "s"} will stop working." data-confirm-title="Make new recovery codes?" data-confirm-ok="Make new codes"` : ""}>${csrfField(s.csrf)}<button class="sm">${codesLeft ? "Make new codes" : "Make recovery codes"}</button></form></div>`;
     } else if (s.pendingTotpEnc) {
       const secret = decrypt(d.config.sessionSecret, s.pendingTotpEnc);
       const qr = await QRCode.toDataURL(totpUri(secret, s.user.email, d.config.rootDomain), { margin: 1, width: 200 });
-      totp = html`<ol style="padding-left:18px;margin:0 0 16px"><li>Scan this QR code with an authenticator app (1Password, Google Authenticator, Authy…), or type the key.</li><li>Enter the 6-digit code it shows.</li></ol>
-        <div class="row tight" style="align-items:flex-start;gap:24px"><img src="${qr}" alt="QR code for the authenticator app" width="168" height="168" style="border-radius:8px;border:1px solid var(--line);background:#fff">
-        <div style="flex:1;min-width:220px"><p class="dim small">Key: <code>${secret}</code></p>
+      totp = html`<div class="row tight" style="align-items:flex-start;gap:20px;flex-wrap:nowrap"><img src="${qr}" alt="QR code for the authenticator app" width="148" height="148" style="border-radius:8px;border:1px solid var(--line);background:#fff;flex:none">
+        <div style="flex:1;min-width:0"><p class="small" style="margin:0 0 6px">Scan the code with an authenticator app (1Password, Google Authenticator, Authy…), or type the key, then enter the 6 digits it shows.</p><p class="dim small">Key: <code>${secret}</code></p>
         <form method="post" action="/account/totp/confirm">${csrfField(s.csrf)}${field({ id: "code", label: "Code", error: fs.for("totp-on").e("code"), control: html`<input id="code" class="w-sm" name="code" inputmode="numeric" required maxlength="7" autocomplete="one-time-code">` })}
-        <div class="row"><button class="primary">Turn on</button><button class="ghost" formaction="/account/totp/cancel" formnovalidate>Cancel</button></div></form></div></div>`;
+        <div class="row tight" style="margin-top:12px"><button class="primary">Turn on</button><button class="ghost" formaction="/account/totp/cancel" formnovalidate>Cancel</button></div></form></div></div>`;
     } else {
       totp = html`<div class="switch-row"><div>${badge("neutral", "Off")} <span class="dim">Add a code from an authenticator app to your password.</span></div>
         <form method="post" action="/account/totp/start">${csrfField(s.csrf)}<button class="primary">Set up two-step sign-in</button></form></div>`;
     }
-    const pw = fs.for("password");
+    const changeEmail = s.elevated ? opener("change-email", "Change email", "sm") : html`<a class="btn sm" href="${sudo("#change-email")}">Change email</a>`;
     return render(req, reply, "Account & security", html`${pageHead({ title: "Account & security", sub: "Your sign-in, two-step sign-in and the devices signed in to this account." })}
       ${staff && !s.user.totp ? html`<div class="callout warn">${icon("alert")}<div><b>Two-step sign-in is required for admins</b><p>Set it up below. Until then the admin console stays closed.</p></div></div>` : ""}
-      ${panel({ title: "Profile", actions: s.elevated ? opener("change-email", "Change email", "sm") : html`<a class="btn sm" href="${sudo("#change-email")}">Change email</a>` }, facts([
-        ["Email", html`${s.user.email} ${s.user.verified ? badge("ok", "Confirmed") : html`${badge("warn", "Not confirmed")} <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button class="sm">Resend link</button></form>`}
-          ${pendingEmail ? html`<span class="sub dim small">Changing to ${pendingEmail}: open the link sent there.</span>` : ""}`],
-        ["Role", s.user.role === "superadmin" ? "Super admin" : s.user.role === "admin" ? "Admin" : "Station owner"],
-        ["Member since", day(me.created_at)],
-        ["Last sign-in", me.last_login_at ? `${when(me.last_login_at)}${me.last_login_ip ? ` from ${me.last_login_ip}` : ""}` : "—"],
-      ]))}
+      <div class="grid2"><div>
+      ${panel({ title: "Profile", actions: html`<div class="line-actions">${changeEmail}${opener("change-password", "Change password", "sm")}</div>` }, html`<dl class="kv">
+        <dt>Email</dt><dd>${s.user.email} ${s.user.verified ? badge("ok", "Confirmed") : html`${badge("warn", "Not confirmed")} <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button class="sm">Resend link</button></form>`}
+          ${pendingEmail ? html`<span class="sub dim small">Changing to ${pendingEmail}: open the link sent there.</span>` : ""}</dd>
+        <dt>Role</dt><dd>${s.user.role === "superadmin" ? "Super admin" : s.user.role === "admin" ? "Admin" : "Station owner"}</dd>
+        <dt>Member since</dt><dd>${day(me.created_at)}</dd>
+        <dt>Last sign-in</dt><dd>${me.last_login_at ? `${when(me.last_login_at)}${me.last_login_ip ? ` from ${me.last_login_ip}` : ""}` : "—"}</dd></dl>`)}
       ${panel({ title: "Two-step sign-in", sub: "A second step at sign-in and before sensitive changes." }, totp)}
-      ${panel({ title: "Password", sub: "Changing it signs out every other device." }, html`<form method="post" action="/account/password">${csrfField(s.csrf)}
-        ${field({ id: "cur", label: "Current password", error: pw.e("current"), control: passwordInput("cur", "current", `required autocomplete="current-password" maxlength="${MAX_PASSWORD}"`) })}
-        <div class="form-grid">
-        ${field({ id: "new", label: "New password", error: pw.e("password"), help: `${MIN_PASSWORD} characters or more.`, control: passwordInput("new", "password", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
-        ${field({ id: "new2", label: "New password again", error: pw.e("password2"), control: passwordInput("new2", "password2", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}</div>
-        <div class="row"><button class="primary">Change password</button></div></form>`)}
+      </div><div>
       ${panel({ title: "Signed-in devices", sub: "End any you do not recognise.", flush: true, actions: sessions.length > 1 ? html`<form method="post" action="/account/sessions/others" data-confirm="Every device but this one is signed out and must sign in again." data-confirm-title="Sign out all other devices?" data-danger>${csrfField(s.csrf)}<button class="sm danger">Sign out all others</button></form>` : "" },
-        table(["Device", "IP address", "Signed in", "Last active", { text: "", cls: "actions" }], sessions.map((x) => html`<tr>
-          <td><b>${deviceOf(x.user_agent)}</b>${x.current ? html` ${badge("accent", "This device")}` : ""}</td><td>${x.ip ?? "—"}</td><td>${when(x.created_at)}</td><td>${when(x.last_seen_at)}</td>
+        table(["Device", "IP address", "Last active", { text: "", cls: "actions" }], sessions.map((x) => html`<tr>
+          <td><b>${deviceOf(x.user_agent)}</b>${x.current ? html` ${badge("accent", "This device")}` : ""}<span class="sub">Signed in ${when(x.created_at)}</span></td><td>${x.ip ?? "—"}</td><td>${when(x.last_seen_at)}</td>
           <td class="actions">${x.current ? "" : html`<form method="post" action="/account/sessions/${x.id}/end" data-confirm="${deviceOf(x.user_agent)}${x.ip ? ` (${x.ip})` : ""} is signed out and must sign in again." data-confirm-title="Sign out this device?">${csrfField(s.csrf)}<button class="sm">Sign out</button></form>`}</td></tr>`)))}
-      ${panel({ title: "Delete account", tone: "danger", sub: superadmin ? "You are the super admin: hand the role to another admin first (People > their page)." : "Deletes your account and every station it has. Their names are held for 30 days." },
-        superadmin ? html`<button class="danger" disabled>Delete my account</button>` : s.elevated ? opener("delete-account", "Delete my account…", "danger") : html`<a class="btn danger" href="${sudo("#delete-account")}">Delete my account…</a>`)}
+      ${panel({ tone: "danger" }, html`<div class="switch-row"><div><b class="bad">Delete account</b><p class="dim small" style="margin:2px 0 0">${superadmin ? "You are the super admin: hand the role to another admin first (People > their page)." : "Deletes your account and every station it has. Their names are held for 30 days."}</p></div>
+        ${superadmin ? html`<button class="danger" disabled>Delete my account</button>` : s.elevated ? opener("delete-account", "Delete my account…", "danger") : html`<a class="btn danger" href="${sudo("#delete-account")}">Delete my account…</a>`}</div>`)}
+      </div></div>
+      ${modal({ id: "change-password", title: "Change your password", text: "Every other device is signed out.", action: "/account/password", csrf: s.csrf, submit: "Change password", open: pw.returned,
+        body: html`${field({ id: "cur", label: "Current password", error: pw.e("current"), control: passwordInput("cur", "current", `required autocomplete="current-password" maxlength="${MAX_PASSWORD}"`) })}
+          ${field({ id: "new", label: "New password", error: pw.e("password"), help: `${MIN_PASSWORD} characters or more.`, control: passwordInput("new", "password", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
+          ${field({ id: "new2", label: "New password again", error: pw.e("password2"), control: passwordInput("new2", "password2", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}` })}
+      ${s.user.totp ? modal({ id: "totp-off", title: "Turn off two-step sign-in", tone: "danger", action: "/account/totp/disable", csrf: s.csrf, submit: "Turn it off", open: off.returned,
+        text: html`<p>Signing in will need only your password${staff ? ", and the admin console closes to you" : ""}. Your recovery codes are deleted.</p>`,
+        body: field({ id: "off", label: "Current code from the app (or a recovery code)", error: off.e("code"), control: codeInput("off", 'class="w-sm"') }) }) : ""}
       ${s.elevated ? modal({ id: "change-email", title: "Change your email", action: "/account/email", csrf: s.csrf, submit: "Send the link", open: fs.for("email").returned,
         text: html`<p>We send a link to the new address; the change happens when you open it. Until then you keep signing in with ${s.user.email}.</p>`,
         body: field({ id: "new-email", label: "New email", error: fs.for("email").e("email"), control: html`<input id="new-email" name="email" type="email" required autocomplete="email" maxlength="254" value="${fs.for("email").v("email")}">` }) }) : ""}
@@ -732,38 +734,39 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const blocked = st.status === "suspended" && !manage;
     const fs = takeForm(req, reply);
     const certText = !cert ? html`<span class="dim">None yet. Nova asks for one when it starts its server.</span>` : cert.status === "issued" ? html`${badge("ok", "Issued")} <span class="dim">until ${day(cert.expires_at)}</span>` : cert.status === "pending" ? badge("info", "Being issued") : html`${badge("bad", "Failed")} <span class="dim">${cert.error ?? ""}</span>`;
+    const rename = fs.for("rename"), move = fs.for("transfer");
+    const actionRow = (title: string, text: string, control: Html) => html`<div class="switch-row" style="padding:14px 0;border-top:1px solid var(--line)"><div style="flex:1;min-width:200px"><b>${title}</b><p class="dim small" style="margin:2px 0 0">${text}</p></div>${control}</div>`;
     return render(req, reply, st.label, html`${pageHead({ title: fqdn, back: fromAdmin ? { href: "/admin/stations", text: "All stations" } : { href: "/", text: "Stations" },
         meta: html`${statusChip(st.status, st.last_seen_at)}${fromAdmin ? html`<span>Owner: ${can(s.user, "users.view") ? html`<a href="/admin/users/${st.user_id}">${st.owner}</a>` : st.owner}</span>` : ""}` })}
       ${st.status === "suspended" ? html`<div class="callout bad">${icon("alert")}<div><b>This station is suspended by the platform</b><p>${manage ? "Its address does not resolve and Nova's requests are refused." : "Contact support to restore it."}</p></div></div>` : ""}
-      <div class="split"><div>
-      ${panel({ title: "Overview" }, facts([
-        ["Address for presenters", html`<div class="copyline"><code>${url}</code><button type="button" class="sm" data-copy="${url}">${icon("copy", 14)} Copy</button></div>`],
-        ["Reached", st.via === "tunnel" && d.config.edgeIp ? "Through the edge (no open port at the station)" : "Directly"],
-        ["Last address", st.last_ip ? `${st.last_ip}${st.last_port ? ` port ${st.last_port}` : ""}` : "—"],
-        ["Last seen", when(st.last_seen_at)],
-        ["Nova version", st.app_version ?? "—"],
-        ["Certificate", certText],
-        ["Audio relay this month", `${bytes(Number(usage.b))} in ${usage.n} session${usage.n === 1 ? "" : "s"}`],
-        ["Created", day(st.created_at)],
-      ]))}
-      ${blocked ? "" : html`
-      ${panel({ title: "Rename", sub: "The old name is held for 30 days. Nova picks up the new name within 5 minutes and gets a new certificate." }, html`
-        <form method="post" action="/stations/${st.id}/rename" data-confirm="Rename ${st.label}? Presenters will need the new address.">${csrfField(s.csrf)}
-          ${field({ id: "label", label: "New name", error: fs.for("rename").e("label"), control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" maxlength="63" spellcheck="false" value="${fs.for("rename").v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` })}
-          <div class="row"><button>Rename station</button></div></form>`)}
-      ${panel({ title: "Access code", sub: "Make a new code if the old one may have leaked. The old code, and every Nova signed in with it, stop working at once." },
-        html`<form method="post" action="/stations/${st.id}/regenerate" data-confirm="Make a new access code? Nova will need it entered again.">${csrfField(s.csrf)}<button>${icon("key", 16)} Make a new access code</button></form>`)}`}
-      ${panel({ title: "Delete station", tone: "danger", sub: "Removes the address, its certificate and every sign-in. The name is held for 30 days." }, opener("delete-station", "Delete this station…", "danger"))}
+      <div class="grid2"><div>
+      ${panel({ title: "Overview" }, html`<dl class="kv">
+        <dt>For presenters</dt><dd><div class="copyline"><code>${url}</code><button type="button" class="sm" data-copy="${url}">${icon("copy", 14)} Copy</button></div></dd>
+        <dt>Reached</dt><dd>${st.via === "tunnel" && d.config.edgeIp ? "Through the edge (no open port at the station)" : "Directly"}</dd>
+        <dt>Last address</dt><dd>${st.last_ip ? `${st.last_ip}${st.last_port ? ` port ${st.last_port}` : ""}` : "—"}</dd>
+        <dt>Last seen</dt><dd>${when(st.last_seen_at)}</dd>
+        <dt>Nova version</dt><dd>${st.app_version ?? "—"}</dd>
+        <dt>Certificate</dt><dd>${certText}</dd>
+        <dt>Audio relay</dt><dd>${bytes(Number(usage.b))} this month, in ${usage.n} session${usage.n === 1 ? "" : "s"}</dd>
+        <dt>Created</dt><dd>${day(st.created_at)}</dd></dl>`)}
+      </div><div>
+      ${panel({ title: "Manage" }, html`<div style="margin-top:-14px">
+        ${blocked ? "" : actionRow("Rename", "The old name is held for 30 days. Nova picks up the new name within 5 minutes.", opener("rename-station", "Rename…", "sm"))}
+        ${blocked ? "" : actionRow("Access code", "If it may have leaked: the old code, and every Nova signed in with it, stop working at once.", html`<form method="post" action="/stations/${st.id}/regenerate" data-confirm="The current code stops working at once, and Nova must be given the new one." data-confirm-title="Make a new access code?" data-confirm-ok="Make a new code">${csrfField(s.csrf)}<button class="sm">${icon("key", 15)} New code</button></form>`)}
+        ${actionRow("Delete", "Removes the address, its certificate and every sign-in. The name is held for 30 days.", opener("delete-station", "Delete…", "sm danger"))}</div>`)}
+      ${manage ? panel({ title: "Administration", sub: "Visible to admins only." }, html`<div style="margin-top:-14px">
+        ${actionRow(st.status === "active" ? "Suspend" : "Restore", st.status === "active" ? "Its address stops resolving and Nova's requests are refused." : "Its address resolves again and Nova may sign in.",
+          html`<form method="post" action="/admin/stations/${st.id}/${st.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${st.status === "active" ? `Suspend ${fqdn}? Its address stops resolving and Nova's requests are refused.` : `Restore ${fqdn}?`}" data-confirm-title="${st.status === "active" ? "Suspend station" : "Restore station"}">${csrfField(s.csrf)}<input type="hidden" name="back" value="/stations/${st.id}"><button class="sm ${st.status === "active" ? "danger" : "primary"}">${st.status === "active" ? "Suspend" : "Restore"}</button></form>`)}
+        ${actionRow("Move to another owner", "A new access code is made for the new owner (shown once); the old one stops working.", opener("move-station", "Move…", "sm"))}</div>`) : ""}
+      </div></div>
+      ${blocked ? "" : modal({ id: "rename-station", title: `Rename ${fqdn}`, action: `/stations/${st.id}/rename`, csrf: s.csrf, submit: "Rename station", open: rename.returned,
+        text: "Presenters will need the new address. The old name is held for 30 days.",
+        body: field({ id: "label", label: "New name", error: rename.e("label"), control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" maxlength="63" spellcheck="false" value="${rename.v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` }) })}
       ${modal({ id: "delete-station", title: `Delete ${fqdn}`, tone: "danger", action: `/stations/${st.id}/delete`, csrf: s.csrf, submit: "Delete station", typed: st.label,
         text: html`<p>The address stops working at once, Nova is signed out, and the certificate is revoked. The name is held for 30 days, then anyone may claim it.</p>` })}
-      </div><div>
-      ${manage ? panel({ title: "Administration", sub: "Visible to admins only." }, html`
-        <form method="post" action="/admin/stations/${st.id}/${st.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${st.status === "active" ? "Suspend" : "Restore"} ${st.label}?">${csrfField(s.csrf)}<input type="hidden" name="back" value="/stations/${st.id}">
-          <button class="${st.status === "active" ? "danger" : "primary"}" style="width:100%">${st.status === "active" ? "Suspend station" : "Restore station"}</button></form>
-        <form method="post" action="/stations/${st.id}/transfer" data-confirm="Give ${st.label} to someone else? Its access code is replaced and Nova is signed out." style="margin-top:20px">${csrfField(s.csrf)}
-          ${field({ id: "to", label: "Move to another owner", error: fs.for("transfer").e("email"), help: "A new access code is made for the new owner (shown once) and the old one stops working.", control: html`<input id="to" name="email" type="email" required autocomplete="off" placeholder="owner@example.com">` })}
-          <div class="row"><button>Move station</button></div></form>`) : ""}
-      </div></div>`, takeFlash(req, reply));
+      ${manage ? modal({ id: "move-station", title: `Move ${fqdn}`, action: `/stations/${st.id}/transfer`, csrf: s.csrf, submit: "Move station", open: move.returned,
+        text: "The new owner's access code is shown once, on the next page; the old one stops working and Nova is signed out.",
+        body: field({ id: "to", label: "New owner's email", error: move.e("email"), control: html`<input id="to" name="email" type="email" required autocomplete="off" placeholder="owner@example.com" value="${move.v("email")}">` }) }) : ""}`, takeFlash(req, reply));
   });
 
   const action = (name: string, run: (s: Session, id: number, f: Form, req: FastifyRequest, reply: FastifyReply) => Promise<unknown>) =>

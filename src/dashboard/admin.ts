@@ -23,7 +23,7 @@ import * as subs from "../lib/subdomains.js";
 import type { DashDeps, Helpers } from "./app.js";
 import { statusChip } from "./app.js";
 import { badge, bytes, csrfField, day, emptyState, field, html, icon, pageHead, panel, when, type Html } from "./html.js";
-import { choiceCards, dateParam, filterBar, like, menu, menuLink, menuOpen, menuPost, menuSep, modal, opener, pageOf, paged, pager, table, withQuery } from "./ui.js";
+import { choiceCards, dateParam, tabs, filterBar, like, menu, menuLink, menuOpen, menuPost, menuSep, modal, opener, pageOf, paged, pager, table, withQuery } from "./ui.js";
 import { headings, markdown } from "./markdown.js";
 import type { Session } from "./session.js";
 
@@ -111,10 +111,10 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const recent = can(s.user, "logs.view") ? (await d.db.query(
       "SELECT a.created_at, a.action, a.target, u.email FROM audit_log a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.created_at DESC LIMIT 8")).rows : [];
     return h.render(req, reply, "Overview", html`${pageHead({ title: "Overview", sub: s.user.role === "superadmin" ? "You are the super admin: you may do everything, and decide what other admins may do." : "What is happening on the platform." })}
-      ${todo.length ? html`<div class="callout warn">${icon("alert")}<div><b>Setup is not finished</b><p>${todo.join("; ")}.</p></div><a class="btn sm" href="/admin/settings" style="margin-left:auto">Open settings</a></div>` : ""}
+      ${todo.length ? html`<div class="callout warn">${icon("alert")}<div><b>Setup is not finished</b><p>${todo.join("; ")}.</p></div><a class="btn sm" href="/admin/setup" style="margin-left:auto">See what is missing</a></div>` : ""}
       ${tiles.length ? html`<div class="stats">${tiles}</div>` : ""}
       ${recent.length ? panel({ title: "Recent activity", flush: true, actions: html`<a class="btn sm" href="/admin/audit">Full audit log</a>` }, table(["When", "Who", "Action", "On"], recent.map((r) => html`<tr>
-        <td>${when(r.created_at)}</td><td>${r.email ?? "—"}</td><td><code>${r.action}</code></td><td>${r.target ?? ""}</td></tr>`))) : ""}`, h.takeFlash(req, reply));
+        <td>${when(r.created_at)}</td><td>${r.email ?? "—"}</td><td><code>${r.action}</code></td><td>${r.target ?? ""}</td></tr>`), { fit: false })) : ""}`, h.takeFlash(req, reply));
   });
 
   // ------------------------------------------------------------------ setup checks
@@ -124,27 +124,33 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const cloudflare = c.dnsProvider === "cloudflare";
     const production = c.acmeDirectoryUrl === LE_PRODUCTION;
     const failed = tested?.dns?.some((x) => x.ok === false);
-    const row = (name: string, state: Html, text: Html | string) => html`<li><div class="row tight" style="justify-content:space-between"><b>${name}</b>${state}</div><p class="dim small" style="margin:4px 0 0">${text}</p></li>`;
-    return h.render(req, reply, "Setup checks", html`${pageHead({ title: "Setup checks", sub: "Whether the platform is ready, and a step-by-step Cloudflare guide.",
-        actions: html`<form method="post" action="/admin/setup/check">${csrfField(s.csrf)}<button class="primary">${cloudflare ? "Test the Cloudflare connection" : "Check the platform's addresses"}</button></form>` })}
-      ${panel({ title: "Status", sub: cloudflare ? "The test adds and removes one TXT record, and looks up the platform's own addresses." : "The check looks up the platform's own addresses." }, html`<ul class="checks">
-        ${row("Domain", badge("neutral", c.rootDomain), "Stations get names under this domain.")}
-        ${row("DNS provider", cloudflare ? badge("ok", "Cloudflare") : badge("bad", c.dnsProvider), cloudflare ? "Station names are published at Cloudflare." : html`Station names are not published on the internet and their certificates fail. Set up Cloudflare with the guide below, then add the token in <a href="/admin/settings">Settings</a>.`)}
-        ${row("Certificates", production ? badge("ok", "Let's Encrypt, production") : badge("warn", "test certificates"), production ? "Browsers trust the certificates." : html`Browsers warn about test certificates. Once a station works, choose production in <a href="/admin/settings">Settings</a>.`)}
-        ${row("Email", c.smtpHost ? badge("ok", "Sending") : badge("bad", "Not sending"), c.smtpHost ? `Through ${c.smtpHost}:${c.smtpPort || ({ ssl: 465, starttls: 587, none: 25 } as const)[c.smtpSecurity]} as ${c.mailFrom}. Send a test from Settings.` : html`Confirmation and reset links are only written to the dashboard's log. Add your SMTP server in <a href="/admin/settings#mail">Settings</a>.`)}
-      </ul>`)}
-      ${tested ? panel({ title: tested.dns ? (failed ? "Cloudflare: something needs fixing" : "Cloudflare: working") : "The platform's addresses", id: "result" }, html`
-        ${tested.dns ? html`<ul class="checks">${tested.dns.map((x) => html`<li>${mark(x.ok)} <b>${x.name}</b><br><span class="${x.ok === false ? "bad" : "dim"}">${x.detail}</span></li>`)}</ul><h3 style="margin:20px 0 4px;font-size:14px">The platform's addresses</h3>` : ""}
-        <ul class="checks">${tested.names.map((x) => html`<li>${mark(x.found.length > 0)} <b>${x.name}</b><br><span class="${x.found.length ? "dim" : "bad"}">${x.found.length
+    const tile = (name: string, state: Html, text: Html | string) => html`<div class="tile"><div class="row tight" style="justify-content:space-between;gap:8px"><b>${name}</b>${state}</div><p>${text}</p></div>`;
+    return h.render(req, reply, "Setup checks", html`${pageHead({ title: "Setup checks", sub: "Whether the platform is ready to serve stations.",
+        actions: html`<a class="btn" href="/admin/setup/guide">${icon("info", 16)} Cloudflare setup guide</a><form method="post" action="/admin/setup/check">${csrfField(s.csrf)}<button class="primary">${cloudflare ? "Test the Cloudflare connection" : "Check the platform's addresses"}</button></form>` })}
+      <div class="tiles" style="margin-bottom:20px">
+        ${tile("Domain", badge("neutral", c.rootDomain), "Stations get names under this domain.")}
+        ${tile("DNS provider", cloudflare ? badge("ok", "Cloudflare") : badge("bad", "None"), cloudflare ? "Station names are published at Cloudflare." : html`Names are not published and certificates fail. Follow <a href="/admin/setup/guide">the guide</a>, then add the token in <a href="/admin/settings?section=dns">Settings</a>.`)}
+        ${tile("Certificates", production ? badge("ok", "Production") : badge("warn", "Staging"), production ? "Browsers trust the certificates." : html`Browsers warn about test certificates. Choose production in <a href="/admin/settings?section=acme">Settings</a> once a station works.`)}
+        ${tile("Email", c.smtpHost ? badge("ok", "Sending") : badge("bad", "Not sending"), c.smtpHost ? `Through ${c.smtpHost}:${c.smtpPort || ({ ssl: 465, starttls: 587, none: 25 } as const)[c.smtpSecurity]} as ${c.mailFrom}.` : html`Links are only written to the dashboard's log. Add your mail server in <a href="/admin/settings?section=mail">Settings</a>.`)}
+      </div>
+      ${tested ? html`<div class="grid2">
+        ${tested.dns ? panel({ title: failed ? "Cloudflare: something needs fixing" : "Cloudflare: working", id: "result" }, html`<ul class="checks">${tested.dns.map((x) => html`<li>${mark(x.ok)} <b>${x.name}</b><br><span class="${x.ok === false ? "bad" : "dim"}">${x.detail}</span></li>`)}</ul>`) : ""}
+        ${panel({ title: "The platform's addresses", id: tested.dns ? "names" : "result" }, html`<ul class="checks">${tested.names.map((x) => html`<li>${mark(x.found.length > 0)} <b>${x.name}</b><br><span class="${x.found.length ? "dim" : "bad"}">${x.found.length
           ? `Points to ${x.found.join(", ")}. Check that this is the right machine's public address.`
-          : "Not found on the internet. Add this record at your DNS provider (the guide's step 6); a new record can take a few minutes to show."}</span></li>`)}</ul>`) : ""}
-      ${cloudflareGuide(c.rootDomain)}`, h.takeFlash(req, reply));
+          : html`Not found on the internet. Add this record at your DNS provider (<a href="/admin/setup/guide#step-6-add-the-platform-s-own-addresses">the guide's step 6</a>); a new record can take a few minutes to show.`}</span></li>`)}</ul>`)}</div>`
+        : panel({}, emptyState("Not tested yet", cloudflare ? "Test the connection: it adds and removes one TXT record at Cloudflare and looks up the platform's own addresses." : "Check the platform's addresses: it looks up api, app and turn on the public internet."))}`, h.takeFlash(req, reply));
   };
 
   app.get("/admin/setup", async (req, reply) => {
     const s = admin(req, reply, "settings.manage");
     if (!s) return reply;
     return setupPage(req, reply, s);
+  });
+  app.get("/admin/setup/guide", async (req, reply) => {
+    const s = admin(req, reply, "settings.manage");
+    if (!s) return reply;
+    return h.render(req, reply, "Cloudflare setup guide", html`${pageHead({ title: "Cloudflare setup guide", back: { href: "/admin/setup", text: "Setup checks" }, sub: "Step by step: the domain on Cloudflare, an API token for station names, and the platform's own records." })}
+      ${cloudflareGuide(d.config.rootDomain)}`);
   });
   app.post("/admin/setup/check", async (req, reply) => {
     const s = admin(req, reply, "settings.manage");
@@ -250,7 +256,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const query = req.query as Record<string, string>;
     const kind = ["blocked", "reserved"].includes(query.kind) ? query.kind : "";
     const pg = pageOf(query);
-    const cpg = pageOf(query, 25, "cpage");
+    const cpg = pageOf(query);
     const { rows: names, total } = await paged<{ label: string; kind: string; reason: string | null; created_at: Date }>(d.db,
       "SELECT label, kind, reason, created_at FROM reserved_names WHERE ($1 = '' OR label LIKE '%' || $1 || '%' OR lower(coalesce(reason, '')) LIKE '%' || $1 || '%') AND ($2 = '' OR kind = $2) ORDER BY kind, label",
       [like(q(req)), kind], pg);
@@ -263,13 +269,19 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
       { value: "blocked", title: "Blocked", text: "Not allowed (offensive, misleading, a brand)." },
       { value: "reserved", title: "Reserved", text: "Kept for the platform's own use." }] });
     const here = withQuery("/admin/names", query);
+    const cool = query.view === "cooling";
+    const counts = (await d.db.query<{ r: string; c: string }>("SELECT (SELECT count(*) FROM reserved_names) AS r, (SELECT count(*) FROM name_cooldowns WHERE available_after > now()) AS c")).rows[0];
     return h.render(req, reply, "Names", html`${pageHead({ title: "Names", sub: "Names nobody may claim, and names waiting 30 days after a rename or delete.",
         actions: opener("add-name", html`${icon("plus", 16)} Reserve or block a name`, "primary") })}
+      ${tabs([
+        { href: "/admin/names", label: "Reserved and blocked", count: Number(counts.r), current: !cool },
+        { href: "/admin/names?view=cooling", label: "Cooling down", count: Number(counts.c), current: cool },
+      ], "Names")}
       ${modal({ id: "add-name", title: "Reserve or block a name", text: "Existing stations keep their names.", action: "/admin/names", csrf: s.csrf, submit: "Add name", open: add.returned,
         body: html`${field({ id: "n-label", label: "Name", error: add.e("label"), control: html`<input id="n-label" name="label" required maxlength="63" autocomplete="off" spellcheck="false" value="${add.v("label")}">` })}
           ${kindCards(add.v("kind", "blocked"), "n-kind")}
           ${field({ id: "n-reason", label: "Reason (optional)", control: html`<input id="n-reason" name="reason" maxlength="200" value="${add.v("reason")}">` })}` })}
-      ${panel({ title: "Reserved and blocked", flush: true }, html`${filterBar({ path: "/admin/names", query, search: { placeholder: "Search names and reasons" },
+      ${cool ? "" : panel({ flush: true }, html`${filterBar({ path: "/admin/names", query, search: { placeholder: "Search names and reasons" },
           chips: { name: "kind", label: "Kind", options: [["", "All"], ["blocked", "Blocked"], ["reserved", "Reserved"]] } })}
         ${names.length ? table(["Name", "Kind", "Reason", "Added", { text: "", cls: "actions" }], names.map((n) => html`<tr><td><b>${n.label}</b></td>
           <td>${n.kind === "blocked" ? badge("bad", "Blocked") : badge("neutral", "Reserved")}</td><td class="dim">${n.reason ?? ""}</td><td>${day(n.created_at)}</td>
@@ -281,11 +293,12 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
         open: edit.returned && edit.v("label") === n.label,
         body: html`${kindCards(edit.returned && edit.v("label") === n.label ? edit.v("kind", n.kind) : n.kind, `e-kind-${n.label}`)}
           ${field({ id: `e-reason-${n.label}`, label: "Reason (optional)", control: html`<input id="e-reason-${n.label}" name="reason" maxlength="200" value="${n.reason ?? ""}">` })}` }))}
-      ${panel({ title: "Cooling down", sub: "Names freed by a rename or delete wait 30 days, so an old address cannot be taken over at once.", flush: true }, html`
+      ${!cool ? "" : panel({ flush: true }, html`${filterBar({ path: "/admin/names", query, search: { placeholder: "Search names" } })}
+        <p class="dim small" style="margin:0;padding:10px 16px;border-bottom:1px solid var(--line)">Names freed by a rename or delete wait 30 days, so an old address cannot be taken over at once.</p>
         ${cooling.length ? table(["Name", "Free again", { text: "", cls: "actions" }], cooling.map((c) => html`<tr><td><b>${c.label}</b></td><td>${when(c.available_after)}</td>
           <td class="actions"><form class="inline" method="post" action="/admin/names/release" data-confirm="Release ${c.label} now? Anyone can then claim it." data-confirm-title="Release name">${csrfField(s.csrf)}<input type="hidden" name="label" value="${c.label}"><button class="sm">Release now</button></form></td></tr>`))
           : none}
-        ${pager("/admin/names", query, cpg, coolingTotal, "names", "cpage")}`)}`,
+        ${pager("/admin/names", query, cpg, coolingTotal, "names")}`)}`,
     h.takeFlash(req, reply));
   });
   const namesBack = (f: Record<string, string>) => (/^\/admin\/names(\?[\w=&%.\-+]*)?$/.test(f.back ?? "") ? f.back : "/admin/names");

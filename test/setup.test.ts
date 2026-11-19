@@ -145,10 +145,13 @@ describe("Admin > Setup", () => {
     const { app, cookie } = await signedIn({ dnsProvider: "cloudflare", rootDomain: "example.test" }, new CloudflareProvider("good-token", fake.zone.id, base));
     const page = await app.inject({ method: "GET", url: "/admin/setup", headers: { cookie } });
     expect(page.statusCode).toBe(200);
-    expect(page.body).toContain("Setting up Cloudflare for Nova");
-    expect(page.body).toContain("kfm.example.test");
-    expect(page.body).not.toContain("yourdomain.com");
+    expect(page.body).toContain('href="/admin/setup/guide"');
     expect(page.body).toContain("test certificates");
+    // The guide is a page of its own.
+    const guide = await app.inject({ method: "GET", url: "/admin/setup/guide", headers: { cookie } });
+    expect(guide.body).toContain("Setting up Cloudflare for Nova");
+    expect(guide.body).toContain("kfm.example.test");
+    expect(guide.body).not.toContain("yourdomain.com");
     expect(page.body).toContain("Test the Cloudflare connection");
 
     const csrf = /name="_csrf" value="([^"]+)"/.exec(page.body)![1];
@@ -168,13 +171,13 @@ describe("Admin > Setup", () => {
     await app.close();
   });
 
-  it("without Cloudflare, says so on the overview and still shows the guide", async () => {
+  it("without Cloudflare, says so on the overview and on the checks", async () => {
     const { app, cookie } = await signedIn({ dnsProvider: "memory" });
     const overview = await app.inject({ method: "GET", url: "/admin", headers: { cookie } });
     expect(overview.body).toContain("Setup is not finished");
     expect(overview.body).toContain("station names are not published");
     const page = await app.inject({ method: "GET", url: "/admin/setup", headers: { cookie } });
-    expect(page.body).toContain("Station names are not published on the internet");
+    expect(page.body).toContain("Names are not published and certificates fail");
     expect(page.body).toContain("Check the platform&#39;s addresses");
     await app.close();
   });
