@@ -180,8 +180,7 @@ export function page(f: Frame, body: Html): string {
   return html`${head}<body class="app">
 <aside class="side">${brand}<nav aria-label="Main">${nav(f)}</nav>${who}</aside>
 <div class="main"><header class="top"><details class="mnav"><summary aria-label="Menu">${icon("menu")}</summary><div class="mnav-panel"><nav aria-label="Main">${nav(f)}</nav>${who}</div></details>${brand}</header>
-<main class="content">${flash}${body}</main>
-<footer class="foot">Remote Studio addresses for Nova · ${f.rootDomain}</footer></div></body></html>`.value;
+<main class="content">${flash}${body}</main></div></body></html>`.value;
 }
 
 export const csrfField = (token?: string) => (token ? html`<input type="hidden" name="_csrf" value="${token}">` : "");
@@ -246,7 +245,7 @@ details.who-menu{display:block}.who-menu .menu-panel{top:auto;bottom:calc(100% +
 .icon-btn{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--side-muted);cursor:pointer}.icon-btn:hover{background:var(--side-hover);color:#fff}
 .main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .top{display:none}
-.content{width:100%;max-width:1160px;margin:0 auto;padding:32px 32px 24px;flex:1}
+.content{width:100%;max-width:none;margin:0;padding:32px 32px 24px;flex:1}
 .foot{padding:16px 32px 24px;color:var(--muted);font-size:12px;text-align:center}
 @media (max-width:960px){
   body.app{display:block;background:var(--bg)}.side{display:none}
@@ -467,6 +466,38 @@ details.meta summary{cursor:pointer;color:var(--accent);font-size:12.5px}details
 
 @media print{.side,.top,.foot,.page-actions,.back,.flash{display:none!important}body.app{display:block;background:#fff}.card{box-shadow:none}}
 
+/* ---------- screen-fitting layouts */
+.table-wrap.fit{overflow:auto;max-height:max(300px,calc(100dvh - 300px))}
+.table-wrap.fit thead th{position:sticky;top:0;z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
+.tabbar{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:-4px 0 20px}
+.tab{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;margin-bottom:-1px;border-bottom:2px solid transparent;color:var(--muted);font-weight:600;font-size:13.5px;text-decoration:none!important}
+.tab:hover{color:var(--ink)}.tab[aria-current]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .count{font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;background:var(--neutral-soft);color:var(--ink-2)}
+dialog.modal.wide{width:min(780px,calc(100vw - 32px))}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}.grid2>.card,.grid2>div>.card:last-child{margin-bottom:0}
+.grid2>div>.card{margin-bottom:20px}
+@media(max-width:1060px){.grid2{grid-template-columns:1fr}}
+.blocks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 40px}
+.block{padding:16px 0;border-top:1px solid var(--line)}.block:nth-child(-n+2){border-top:0;padding-top:0}
+.cols2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 40px}.cols2>div>.block{border-top:0;padding-top:0}.cols2>div>.block+.block{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
+@media(max-width:1060px){.cols2{grid-template-columns:1fr}.cols2>div+div{border-top:1px solid var(--line);padding-top:16px;margin-top:16px}}
+.blocks.three{grid-template-columns:repeat(3,minmax(0,1fr))}.blocks.three .block:nth-child(3){border-top:0;padding-top:0}
+@media(max-width:1200px){.blocks.three{grid-template-columns:1fr}.blocks.three .block:nth-child(n+2){border-top:1px solid var(--line);padding-top:16px}}
+.field{position:relative}.field>.src{position:absolute;top:-1px;right:0;margin:0;display:flex;gap:6px;align-items:center;font-size:12px;max-width:70%;justify-content:flex-end}
+.field>.src .badge{font-size:11px;line-height:16px;padding:1px 7px 1px 6px}.field>.src button{min-height:0;padding:0 4px;font-size:12px;border:0;box-shadow:none;background:none;color:var(--accent)}
+.field>.src code{font-size:11px;padding:1px 5px}
+.seg.full{display:flex}.seg.full label{flex:1;text-align:center}
+.block h3{font-size:14px;font-weight:600;margin:0 0 2px}.block>p.dim{font-size:12.5px;margin:0 0 12px}
+@media(max-width:1060px){.blocks{grid-template-columns:1fr}.block:nth-child(2){border-top:1px solid var(--line);padding-top:16px}}
+.line-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 20px;margin:0}.kv dt{color:var(--muted);font-size:13px}.kv dd{margin:0;overflow-wrap:anywhere}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.tile{border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;background:var(--surface-2)}.tile b{display:block;margin-bottom:4px}.tile p{margin:6px 0 0;font-size:12.5px;color:var(--muted)}
+.pp{display:none}
+.psplit{display:grid;grid-template-columns:minmax(240px,320px) minmax(0,1fr);gap:28px}@media(max-width:900px){.psplit{grid-template-columns:1fr}}
+.options.stack{grid-template-columns:1fr}
+.options.three{grid-template-columns:repeat(3,minmax(0,1fr))}@media(max-width:700px){.options.three{grid-template-columns:1fr}}
+
 /* ---------- segmented control */
 .seg{display:inline-flex;padding:3px;gap:2px;border:1px solid var(--line-2);border-radius:9px;background:var(--surface-2)}
 .seg label{position:relative;margin:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:500;color:var(--ink-2)}
@@ -554,7 +585,13 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.addEventListener("submit", (e) => {
     const f = e.target;
-    if (!f.hasAttribute("data-confirm") || f.dataset.confirmed) return;
+    const sub0 = e.submitter;
+    // A button may carry its own question (data-confirm on the button).
+    const own = sub0 && sub0.hasAttribute("data-confirm") ? sub0 : null;
+    if ((!own && !f.hasAttribute("data-confirm")) || f.dataset.confirmed) return;
+    // A button sending the form elsewhere (Test, Remove) is not what the form's question is about.
+    if (!own && sub0 && sub0.hasAttribute("formaction")) return;
+    const q = own || f;
     // data-confirm-when="name=value": ask only when the form is about to save that choice.
     // data-confirm-unless="name=value": not when it keeps that choice.
     const chosen = (rule) => {
@@ -562,17 +599,17 @@ document.addEventListener("DOMContentLoaded", () => {
       const el = [...f.querySelectorAll("[name]")].find((x) => x.name === name && (x.type !== "radio" || x.checked));
       return !!el && el.value === value;
     };
-    if (f.hasAttribute("data-confirm-when") && !chosen(f.getAttribute("data-confirm-when"))) return;
-    if (f.hasAttribute("data-confirm-unless") && chosen(f.getAttribute("data-confirm-unless"))) return;
+    if (q.hasAttribute("data-confirm-when") && !chosen(q.getAttribute("data-confirm-when"))) return;
+    if (q.hasAttribute("data-confirm-unless") && chosen(q.getAttribute("data-confirm-unless"))) return;
     e.preventDefault();
     const sub = e.submitter;
     const m = f.closest("details.menu") || (sub && sub.closest("details.menu"));
     if (m) m.removeAttribute("open");
-    const danger = f.hasAttribute("data-danger") || (sub && /danger/.test(sub.className));
-    ask.querySelector("h2").textContent = f.getAttribute("data-confirm-title") || "Are you sure?";
-    ask.querySelector(".modal-text").textContent = f.getAttribute("data-confirm");
+    const danger = q.hasAttribute("data-danger") || (sub && /danger/.test(sub.className));
+    ask.querySelector("h2").textContent = q.getAttribute("data-confirm-title") || "Are you sure?";
+    ask.querySelector(".modal-text").textContent = q.getAttribute("data-confirm");
     const ok = ask.querySelector("[data-ok]");
-    ok.textContent = f.getAttribute("data-confirm-ok") || (sub && sub.textContent.trim()) || "Continue";
+    ok.textContent = q.getAttribute("data-confirm-ok") || (sub && sub.textContent.trim()) || "Continue";
     ok.className = danger ? "danger-solid" : "primary";
     ask.classList.toggle("danger", !!danger);
     pending = { form: f, submitter: sub };
@@ -598,6 +635,15 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.target.matches("[data-no-autosubmit]")) return;
     f.requestSubmit();
   }));
+  // ---- a growing list takes the height left on the screen and scrolls inside its card.
+  const fit = () => document.querySelectorAll("[data-fit]").forEach((w) => {
+    w.style.maxHeight = "none";
+    const top = w.getBoundingClientRect().top + window.scrollY;
+    const after = document.documentElement.scrollHeight - (top + w.offsetHeight);
+    w.style.maxHeight = Math.max(300, window.innerHeight - top - after - 8) + "px";
+  });
+  fit();
+  window.addEventListener("resize", fit);
   // ---- menus: one open at a time, placed so a scrolling table does not cut them off.
   const openMenus = () => document.querySelectorAll("details.menu[open]");
   const place = (d) => {

@@ -231,7 +231,7 @@ describe("people and stations", () => {
   it("deletes a person with their stations, in sudo mode", async () => {
     const id = await idOf("owner@example.test");
     await chief.sudoExpires();
-    expect((await chief.get(`/admin/users/${id}`)).body).toContain("Confirm it is you to continue");
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("Delete… (confirm it is you first)");
     await chief.post(`/admin/users/${id}/delete`, { confirm: "owner@example.test" }, `/admin/users/${id}`);
     expect((await db.query("SELECT 1 FROM users WHERE id = $1", [id])).rowCount).toBe(1);
     await chief.sudo();
@@ -287,7 +287,8 @@ describe("settings", () => {
 
   it("store credentials encrypted, take effect at once, and go back to .env", async () => {
     await chief.sudo("/admin/settings");
-    expect((await chief.get("/admin/settings")).body).toContain("Cloudflare credentials");
+    expect((await chief.get("/admin/settings")).body).toContain("Email server");
+    expect((await chief.get("/admin/settings?section=dns")).body).toContain("Cloudflare credentials");
 
     const smtpForm = { smtpHost: "smtp.example.test", smtpSecurity: "starttls", smtpPort: "", smtpUser: "mailer@example.test", smtpPassword: "s3cret p@ss/#word", mailFromName: "Radio", mailFromEmail: "hi@example.test" };
     await chief.post("/admin/settings/mail", smtpForm, "/admin/settings");
@@ -448,8 +449,8 @@ describe("lists", () => {
     page = (await chief.get(`/admin/billing/payments/${pid}`)).body;
     expect(page).toContain("ref_detail");
     expect(page).toContain("$19.99");
-    expect((await chief.get("/admin/billing?status=failed&q=ref_det")).body).toContain("ref_detail");
-    expect((await chief.get("/admin/billing?status=paid&q=ref_det")).body).not.toContain("ref_detail");
+    expect((await chief.get("/admin/billing/payments?status=failed&q=ref_det")).body).toContain("ref_detail");
+    expect((await chief.get("/admin/billing/payments?status=paid&q=ref_det")).body).not.toContain("ref_detail");
   });
 });
 
@@ -501,5 +502,23 @@ describe("admin changes", () => {
     expect(page).toContain("Type the password again to save it");
     expect(page).not.toContain("typed-secret");
     expect(p.config.smtpHost).not.toBe("mail.example.test");
+  });
+});
+
+describe("payments setup", () => {
+  it("one form picks the provider and saves its keys; a bad key comes back on that provider", async () => {
+    await chief.sudo("/admin/billing");
+    await chief.post("/admin/billing/setup", { provider: "paystack", key_paystack: "sk_live_short", key_stripe: "" }, "/admin/billing");
+    let page = (await chief.get("/admin/billing?p=paystack")).body;
+    expect(page).toContain('class="field-error"');
+    expect(page).toMatch(/value="paystack" checked/);
+    await chief.post("/admin/billing/setup", { provider: "paystack", key_paystack: `sk_test_${"a".repeat(40)}` }, "/admin/billing");
+    expect((await db.query("SELECT provider FROM billing")).rows[0].provider).toBe("paystack");
+    expect((await db.query("SELECT 1 FROM payment_providers WHERE provider = 'paystack' AND secret_key_enc IS NOT NULL")).rowCount).toBe(1);
+    page = (await chief.get("/admin/billing")).body;
+    expect(page).toContain("Takes payments");
+    // With no priced plan yet, turning payments on is not offered.
+    await db.query("UPDATE plans SET price_minor = NULL, currency = NULL");
+    expect((await chief.get("/admin/billing")).body).toMatch(/<button form="switch" class="primary" disabled>Turn payments on/);
   });
 });

@@ -66,6 +66,28 @@ choice, and it can only be tested after saving.
 - [x] 23. **M** Delete your own account (sudo + typed confirm modal; the super admin must hand over the role first).
 - [x] 24. **S** Billing history pagination + receipt page; confirm-password and show/hide on sign-up and reset.
 
+## Phase 5 — Layout pass: every page fits one screen
+
+Measured at 1908×955 (one screen = 955 px). Before → after:
+
+| Page | Before | After | How |
+|------|-------:|------:|-----|
+| Setup checks | 5713 | 955 | Cloudflare guide moved to its own page (/admin/setup/guide); checks as four tiles |
+| Payments | 5608 | 955 | Tabs Setup / Payments; one setup card: provider choice on the left swaps that provider's keys form on the right; on/off in the card header (disabled with the reason when not ready) |
+| People | 3650 | 955 | List scrolls inside its card (sticky header), page stays put |
+| Settings | 3303 | 955 | Tabs Email / DNS / Certificates; email form in two columns; "Set here / From .env" beside each label; security as a segmented control |
+| All stations | 3135 | 955 | List scrolls inside its card |
+| Audit log | 2681 | 955 | List scrolls inside its card |
+| DNS & ACME events | 2345 | 955 | List scrolls inside its card |
+| Account & security | 1773 | 955 | Two columns; password change and turning two-step off are dialogs; delete is one row |
+| Person page | 1754 | 955 | Role and permissions in a dialog; plan and limit on one line |
+| Names | 1719 | 955 | Tabs Reserved and blocked / Cooling down; list scrolls inside its card |
+| Station page | 1513 | 955 | Overview beside a Manage card; rename, move and delete are dialogs |
+| Plan page | 1111 | 955 | Plan and Price side by side; delete in the page header |
+
+- [x] 25. **S** Shared: `table()` fits the screen by default (scrolls inside its card, header stays); `tabs()`; wide dialogs; a button can carry its own confirmation; content uses the full width of the screen (checked at 1920×1080, 2560×1440 and 3840×2160); no footer on signed-in pages.
+- [x] 26. **M** The pages above.
+
 ---
 
 ## Control changes (R6)
@@ -78,4 +100,4 @@ choice, and it can only be tested after saving.
 | select Staging/Production | certificates | radio cards (Production confirms) |
 | select month/year | plan period | segmented control |
 | select + Filter button | payments | status chips |
-| — | SMTP security | radio cards |
+| — | SMTP security | segmented control (SSL/TLS · STARTTLS · None) |
