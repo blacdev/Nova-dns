@@ -85,7 +85,7 @@ Measured at 1908×955 (one screen = 955 px). Before → after:
 | Station page | 1513 | 955 | Overview beside a Manage card; rename, move and delete are dialogs |
 | Plan page | 1111 | 955 | Plan and Price side by side; delete in the page header |
 
-- [x] 25. **S** Shared: `table()` fits the screen by default (scrolls inside its card, header stays); `tabs()`; wide dialogs; a button can carry its own confirmation; content width 1160 → 1480 px; no footer on signed-in pages.
+- [x] 25. **S** Shared: `table()` fits the screen by default (scrolls inside its card, header stays); `tabs()`; wide dialogs; a button can carry its own confirmation; content uses the full width of the screen (checked at 1920×1080, 2560×1440 and 3840×2160); no footer on signed-in pages.
 - [x] 26. **M** The pages above.
 
 ---

@@ -245,7 +245,7 @@ details.who-menu{display:block}.who-menu .menu-panel{top:auto;bottom:calc(100% +
 .icon-btn{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--side-muted);cursor:pointer}.icon-btn:hover{background:var(--side-hover);color:#fff}
 .main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .top{display:none}
-.content{width:100%;max-width:1480px;margin:0 auto;padding:32px 32px 24px;flex:1}
+.content{width:100%;max-width:none;margin:0;padding:32px 32px 24px;flex:1}
 .foot{padding:16px 32px 24px;color:var(--muted);font-size:12px;text-align:center}
 @media (max-width:960px){
   body.app{display:block;background:var(--bg)}.side{display:none}
