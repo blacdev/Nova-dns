@@ -84,8 +84,9 @@ the super admin (see below).
 - **People and stations**: admins add people (they get an email to choose a password),
   confirm emails, send reset links, turn off a lost second factor, suspend, delete; create
   a station for someone and move a station to another owner (its access code is replaced).
-- **Settings** (Admin > Settings): the Cloudflare token and zone, the SMTP address and
-  sender, the Let's Encrypt email, staging or production, and the weekly certificate
+- **Settings** (Admin > Settings): the Cloudflare token and zone, the SMTP server (host,
+  port, SSL/TLS or STARTTLS, username, password, with presets for common providers and a
+  test email that uses the values before they are saved) and sender, the Let's Encrypt email, staging or production, and the weekly certificate
   limit, without editing `.env` or restarting. Saved values win over `.env`, are stored
   encrypted (key from `SESSION_SECRET`), are never shown again, and reach every process
   within seconds. Changing them needs the `settings.manage` permission, two-step sign-in,

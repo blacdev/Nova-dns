@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { buildApi } from "./api/app.js";
 import { Metrics } from "./api/studio.js";
 import { Issuer } from "./acme/issuer.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, smtpOf } from "./config.js";
 import { buildDashboard } from "./dashboard/app.js";
 import { connect, migrate, type Db } from "./db/db.js";
 import { DnsManager } from "./dns/dns.js";
@@ -42,7 +42,7 @@ async function main() {
 
   // Settings saved in the dashboard win over .env; every process follows a change at once.
   const dns = new DnsManager(db, providerFor(config), config.rootDomain);
-  const mail = switchableMailer(makeMailer(config.smtpUrl, config.mailFrom));
+  const mail = switchableMailer(makeMailer(smtpOf(config), config.mailFrom));
   const live = new LiveConfig(config, db, { dns, mail });
   await live.reload();
   const stopWatching = watchSettings(config.databaseUrl, live);

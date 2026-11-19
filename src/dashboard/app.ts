@@ -16,7 +16,7 @@ import { transaction } from "../db/db.js";
 import type { DnsManager } from "../dns/dns.js";
 import { audit } from "../lib/audit.js";
 import { forget, hit, LIMITS } from "../lib/limits.js";
-import type { Mailer } from "../lib/mail.js";
+import type { Mailer, testSmtp } from "../lib/mail.js";
 import { checkName, fqdnOf, normaliseLabel } from "../lib/names.js";
 import { presenterPort } from "../api/studio.js";
 import { allowance, stationWord } from "../lib/plans.js";
@@ -42,6 +42,8 @@ export interface DashDeps {
   live?: LiveConfig;
   /** Payment providers' APIs (tests replace the network). */
   fetch?: typeof fetch;
+  /** Sends Admin > Settings' test email (tests replace the network). */
+  testSmtp?: typeof testSmtp;
 }
 
 type Form = Record<string, string>;

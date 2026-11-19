@@ -300,7 +300,9 @@ body.app{display:grid;grid-template-columns:264px minmax(0,1fr);min-height:100vh
 .callout p:last-child{margin:0}.callout b{display:block;margin-bottom:2px}
 
 /* ---------- forms */
-label{display:block;margin:0 0 6px;font-weight:500;font-size:13.5px;color:var(--ink-2)}
+label,.label{display:block;margin:0 0 6px;font-weight:500;font-size:13.5px;color:var(--ink-2)}
+label.inline-check{display:flex;gap:8px;align-items:center;font-weight:400;margin:8px 0 0;color:var(--ink-2)}label.inline-check input{accent-color:var(--accent);width:16px;height:16px}
+.input-group button.addon{border:0;border-left:1px solid var(--line);border-radius:0;box-shadow:none;min-height:0;font-weight:500;color:var(--ink-2);cursor:pointer}
 .field{margin-bottom:18px}.field:last-child{margin-bottom:0}.help{color:var(--muted);font-size:12.5px;margin:6px 0 0}
 input[type=text],input[type=email],input[type=password],input[type=search],input[type=number],input[type=url],input:not([type]),select,textarea{width:100%;max-width:100%;padding:9px 12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
 input::placeholder{color:var(--muted);opacity:.8}
@@ -437,6 +439,37 @@ document.addEventListener("DOMContentLoaded", () => {
   }));
   document.querySelectorAll("form[data-confirm]").forEach((f) => f.addEventListener("submit", (e) => {
     if (!confirm(f.getAttribute("data-confirm"))) e.preventDefault();
+  }));
+  // Email settings: a provider fills in the server; the security sets its usual port.
+  const smtp = document.querySelector("form[data-smtp]");
+  if (smtp) {
+    const port = smtp.querySelector("#smtpPort");
+    const note = smtp.querySelector("#smtp-preset-note");
+    const defaults = ["465", "587", "25", ""];
+    smtp.querySelectorAll("input[name=smtpSecurity]").forEach((r) => r.addEventListener("change", () => {
+      if (r.checked && port && defaults.includes(port.value)) port.value = r.getAttribute("data-port");
+    }));
+    const preset = smtp.querySelector("[data-smtp-preset]");
+    if (preset) preset.addEventListener("change", () => {
+      const o = preset.selectedOptions[0];
+      if (note) note.textContent = o.getAttribute("data-note") || "";
+      if (!o.value) return;
+      smtp.querySelector("#smtpHost").value = o.getAttribute("data-host");
+      const sec = smtp.querySelector("input[name=smtpSecurity][value=" + o.getAttribute("data-security") + "]");
+      if (sec) sec.checked = true;
+      if (port) port.value = o.getAttribute("data-port");
+      const user = smtp.querySelector("#smtpUser");
+      if (o.getAttribute("data-user") && user) user.value = o.getAttribute("data-user");
+    });
+  }
+  // Show or hide a password.
+  document.querySelectorAll("[data-reveal]").forEach((b) => b.addEventListener("click", () => {
+    const i = document.getElementById(b.getAttribute("data-reveal"));
+    if (!i) return;
+    const show = i.type === "password";
+    i.type = show ? "text" : "password";
+    b.textContent = show ? "Hide" : "Show";
+    b.setAttribute("aria-label", show ? "Hide password" : "Show password");
   }));
   // Closing the phone menu when a link in it is followed.
   document.querySelectorAll(".mnav a").forEach((a) => a.addEventListener("click", () => a.closest("details").removeAttribute("open")));

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { LightMyRequestResponse } from "fastify";
 import { buildDashboard } from "../src/dashboard/app.js";
 import type { Db } from "../src/db/db.js";
-import type { Mail } from "../src/lib/mail.js";
+import { parseSmtpUrl, type Mail, type Smtp } from "../src/lib/mail.js";
 import { totpAt } from "../src/lib/secrets.js";
 import { LiveConfig } from "../src/lib/settings.js";
 import { freshDb, platform } from "./helpers.js";
@@ -14,13 +14,19 @@ let app: ReturnType<typeof buildDashboard>;
 let p: ReturnType<typeof platform>;
 let live: LiveConfig;
 const mails: Mail[] = [];
+const smtpTests: { smtp: Smtp; from: string; to: string }[] = [];
+let smtpFails = "";
 const PW = "correct horse battery";
 
 beforeAll(async () => {
   db = await freshDb();
   p = platform(db, { dashboardUrl: "http://app.example.test" });
   live = new LiveConfig(p.config, db, { dns: p.dns });
-  app = buildDashboard({ db, dns: p.dns, config: p.config, live, mail: async (m) => { mails.push(m); } });
+  app = buildDashboard({ db, dns: p.dns, config: p.config, live, mail: async (m) => { mails.push(m); },
+    testSmtp: async (smtp, from, to) => {
+      if (smtpFails) throw new Error(smtpFails);
+      smtpTests.push({ smtp, from, to });
+    } });
 });
 afterAll(async () => {
   await app.close();
@@ -283,14 +289,48 @@ describe("settings", () => {
     await chief.sudo("/admin/settings");
     expect((await chief.get("/admin/settings")).body).toContain("Cloudflare credentials");
 
-    await chief.post("/admin/settings/mail", { smtpUrl: "smtps://mailer:s3cret-pass@smtp.example.test:465", mailFrom: "Radio <hi@example.test>" }, "/admin/settings");
-    expect(p.config.smtpUrl).toBe("smtps://mailer:s3cret-pass@smtp.example.test:465");
+    const smtpForm = { smtpHost: "smtp.example.test", smtpSecurity: "starttls", smtpPort: "", smtpUser: "mailer@example.test", smtpPassword: "s3cret p@ss/#word", mailFromName: "Radio", mailFromEmail: "hi@example.test" };
+    await chief.post("/admin/settings/mail", smtpForm, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("smtp.example.test:587");
+    expect([p.config.smtpHost, p.config.smtpPort, p.config.smtpSecurity, p.config.smtpUser]).toEqual(["smtp.example.test", 587, "starttls", "mailer@example.test"]);
+    // Characters that broke the old single address are fine as a separate password.
+    expect(p.config.smtpPassword).toBe("s3cret p@ss/#word");
     expect(p.config.mailFrom).toBe("Radio <hi@example.test>");
     const raw = JSON.stringify((await db.query("SELECT * FROM settings")).rows) + JSON.stringify((await db.query("SELECT * FROM audit_log")).rows);
-    expect(raw).not.toContain("s3cret-pass");
-    const page = (await chief.get("/admin/settings")).body;
-    expect(page).not.toContain("s3cret-pass");
-    expect(page).toContain("smtps://mailer:••••@smtp.example.test:465");
+    expect(raw).not.toContain("s3cret");
+    let page = (await chief.get("/admin/settings")).body;
+    expect(page).not.toContain("s3cret");
+    expect(page).toContain('value="smtp.example.test"');
+
+    // Changing only the port keeps the password (an empty box means unchanged).
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpSecurity: "ssl", smtpPort: "2465", smtpPassword: "" }, "/admin/settings");
+    expect([p.config.smtpPort, p.config.smtpSecurity, p.config.smtpPassword]).toEqual([2465, "ssl", "s3cret p@ss/#word"]);
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpHost: "smtp://bad", smtpPassword: "" }, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("no smtp:// in front");
+
+    // The test uses the form's values before they are saved, and explains failures.
+    await chief.post("/admin/settings/test-mail", { ...smtpForm, smtpHost: "other.example.test", smtpPassword: "", testTo: "ops@example.test" }, "/admin/settings");
+    expect(smtpTests.at(-1)).toMatchObject({ to: "ops@example.test", from: "Radio <hi@example.test>", smtp: { host: "other.example.test", port: 587, password: "s3cret p@ss/#word" } });
+    expect(p.config.smtpHost).toBe("smtp.example.test");
+    smtpFails = "The server refused the username or password.";
+    await chief.post("/admin/settings/test-mail", { ...smtpForm, testTo: "ops@example.test" }, "/admin/settings");
+    expect(await chief.flash("/admin/settings")).toContain("refused the username or password");
+    smtpFails = "";
+
+    // Removing the password.
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpPassword: "", clearSmtpPassword: "1" }, "/admin/settings");
+    expect(p.config.smtpPassword).toBe("");
+
+    // An address saved by an earlier version is read in parts, then written out on the next save.
+    await db.query("DELETE FROM settings WHERE key LIKE 'smtp%'");
+    await db.query("INSERT INTO settings (key, value, secret) VALUES ('smtpUrl', $1, true)", [(await import("../src/lib/secrets.js")).encrypt(p.config.sessionSecret, "smtps://old%40example.test:pa%3Ass@legacy.example.test:465")]);
+    await live.reload();
+    expect([p.config.smtpHost, p.config.smtpSecurity, p.config.smtpUser, p.config.smtpPassword]).toEqual(["legacy.example.test", "ssl", "old@example.test", "pa:ss"]);
+    page = (await chief.get("/admin/settings")).body;
+    expect(page).toContain("Saved as one SMTP address by an earlier version");
+    await chief.post("/admin/settings/mail", { ...smtpForm, smtpHost: "legacy.example.test", smtpSecurity: "ssl", smtpPort: "465", smtpUser: "old@example.test", smtpPassword: "" }, "/admin/settings");
+    expect((await db.query("SELECT 1 FROM settings WHERE key = 'smtpUrl'")).rowCount).toBe(0);
+    expect(p.config.smtpPassword).toBe("pa:ss");
 
     // Cloudflare: the DNS provider changes without a restart.
     expect(p.dns.providerName).toBe("memory");
@@ -298,7 +338,7 @@ describe("settings", () => {
     expect(p.config.cloudflareZoneId).toBe("a".repeat(32));
     expect(p.dns.providerName).toBe("cloudflare");
     // Another process (a fresh LiveConfig over the same database) sees the same.
-    const other = { ...p.config, dnsProvider: "memory" as const, cloudflareApiToken: "", cloudflareZoneId: "", smtpUrl: "" };
+    const other = { ...p.config, dnsProvider: "memory" as const, cloudflareApiToken: "", cloudflareZoneId: "", smtpHost: "" };
     await new LiveConfig(other, db).reload();
     expect(other.cloudflareApiToken).toBe("x".repeat(40));
 
@@ -307,6 +347,12 @@ describe("settings", () => {
 
     await chief.post("/admin/settings/acme", { acmeEmail: "not an email" }, "/admin/settings");
     expect(await chief.flash("/admin/settings")).toContain("not an email address");
+  });
+
+  it("read SMTP_URL from earlier versions", () => {
+    expect(parseSmtpUrl("smtp://u:p@mail.example.test:587")).toEqual({ host: "mail.example.test", port: 587, security: "starttls", user: "u", password: "p" });
+    expect(parseSmtpUrl("smtp://relay.example.test:25")?.security).toBe("none");
+    expect(parseSmtpUrl("https://example.test")).toBeNull();
   });
 
   it("are not for admins without the permission", async () => {

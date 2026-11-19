@@ -82,7 +82,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   const unfinished = () => [
     d.config.dnsProvider === "memory" ? "station names are not published (no DNS provider)" : "",
     d.config.dnsProvider !== "challtestsrv" && d.config.acmeDirectoryUrl !== LE_PRODUCTION ? "certificates are test certificates (Let's Encrypt staging)" : "",
-    d.config.smtpUrl ? "" : "no email is sent",
+    d.config.smtpHost ? "" : "no email is sent",
   ].filter(Boolean);
 
   // ------------------------------------------------------------------ overview
@@ -127,7 +127,7 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
         ${row("Domain", badge("neutral", c.rootDomain), "Stations get names under this domain.")}
         ${row("DNS provider", cloudflare ? badge("ok", "Cloudflare") : badge("bad", c.dnsProvider), cloudflare ? "Station names are published at Cloudflare." : html`Station names are not published on the internet and their certificates fail. Set up Cloudflare with the guide below, then add the token in <a href="/admin/settings">Settings</a>.`)}
         ${row("Certificates", production ? badge("ok", "Let's Encrypt, production") : badge("warn", "test certificates"), production ? "Browsers trust the certificates." : html`Browsers warn about test certificates. Once a station works, choose production in <a href="/admin/settings">Settings</a>.`)}
-        ${row("Email", c.smtpUrl ? badge("ok", "Sending") : badge("bad", "Not sending"), c.smtpUrl ? `As ${c.mailFrom}.` : html`Confirmation and reset links are only written to the dashboard's log. Add an SMTP address in <a href="/admin/settings">Settings</a>.`)}
+        ${row("Email", c.smtpHost ? badge("ok", "Sending") : badge("bad", "Not sending"), c.smtpHost ? `Through ${c.smtpHost}:${c.smtpPort || ({ ssl: 465, starttls: 587, none: 25 } as const)[c.smtpSecurity]} as ${c.mailFrom}. Send a test from Settings.` : html`Confirmation and reset links are only written to the dashboard's log. Add your SMTP server in <a href="/admin/settings#mail">Settings</a>.`)}
       </ul>`)}
       ${tested ? panel({ title: tested.dns ? (failed ? "Cloudflare: something needs fixing" : "Cloudflare: working") : "The platform's addresses", id: "result" }, html`
         ${tested.dns ? html`<ul class="checks">${tested.dns.map((x) => html`<li>${mark(x.ok)} <b>${x.name}</b><br><span class="${x.ok === false ? "bad" : "dim"}">${x.detail}</span></li>`)}</ul><h3 style="margin:20px 0 4px;font-size:14px">The platform's addresses</h3>` : ""}
