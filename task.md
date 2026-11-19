@@ -36,13 +36,13 @@ choice, and it can only be tested after saving.
 
 ## Phase 1 — Shared UI building blocks (`html.ts`, `/static/app.js`)
 
-- [ ] 5. **M** Form state: errors keep the typed values (never secrets) and show the message under the field (`aria-invalid`), via a short-lived cookie next to the flash.
-- [ ] 6. **M** Modal on native `<dialog>` (CSP-safe): every `data-confirm` becomes a styled confirm dialog; typed-confirm dialogs (submit enabled only when the text matches); forms inside dialogs.
-- [ ] 7. **M** Action menu (`⋯` on rows, "Actions ▾" on pages): keyboard usable, closes on Esc / outside click / another menu opening, positioned so table scrolling does not clip it.
-- [ ] 8. **M** Pagination: one query helper (page, per page, total) + footer "Showing 51–100 of 812 · ‹ 1 2 3 … ›" keeping the other query parameters.
-- [ ] 9. **S** Filter bar: search, status chips (links), selects that apply on change; all in the URL.
-- [ ] 10. **S** Submit buttons show a busy state and block double submits.
-- [ ] 11. **S** Radio-card and segmented-control helpers; `<thead>/<tbody>` tables; phone menu closes on Esc / outside click; user menu on the avatar.
+- [x] 5. **M** Form state: errors keep the typed values (never secrets) and show the message under the field (`aria-invalid`), via a short-lived cookie next to the flash.
+- [x] 6. **M** Modal on native `<dialog>` (CSP-safe): every `data-confirm` becomes a styled confirm dialog; typed-confirm dialogs (submit enabled only when the text matches); forms inside dialogs.
+- [x] 7. **M** Action menu (`⋯` on rows, "Actions ▾" on pages): keyboard usable, closes on Esc / outside click / another menu opening, positioned so table scrolling does not clip it.
+- [x] 8. **M** Pagination: one query helper (page, per page, total) + footer "Showing 51–100 of 812 · ‹ 1 2 3 … ›" keeping the other query parameters.
+- [x] 9. **S** Filter bar: search, status chips (links), selects that apply on change; all in the URL.
+- [x] 10. **S** Submit buttons show a busy state and block double submits.
+- [x] 11. **S** Radio-card and segmented-control helpers; `<thead>/<tbody>` tables; phone menu closes on Esc / outside click; user menu on the avatar.
 
 ## Phase 2 — Admin lists
 

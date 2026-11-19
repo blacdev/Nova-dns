@@ -29,6 +29,7 @@ import { peopleRoutes } from "./admin-people.js";
 import { settingsRoutes } from "./admin-settings.js";
 import { billingAdminRoutes } from "./admin-billing.js";
 import { APP_JS, badge, bytes, csrfField, day, emptyState, facts, field, html, icon, page, pageHead, panel, when, type Html } from "./html.js";
+import { FormState, SECRET_FIELD } from "./ui.js";
 import { cookieNames, csrfOk, elevate, endSession, loadSession, preToken, startSession, SUDO_MINUTES, type Session } from "./session.js";
 
 export interface DashDeps {
@@ -48,6 +49,8 @@ export interface DashDeps {
 
 type Form = Record<string, string>;
 export type Flash = { kind: "ok" | "bad"; text: string } | null;
+/** A form to show again after an error: its id, what was typed, and the message for each field. */
+export type Keep = { form: string; values: Form; errors?: Record<string, string> };
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -130,9 +133,28 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     }
     return s;
   };
-  const back = (reply: FastifyReply, to: string, flash: Flash) => {
+  const back = (reply: FastifyReply, to: string, flash: Flash, keep?: Keep) => {
     if (flash) reply.setCookie("nova_flash", `${flash.kind}:${flash.text}`, { path: "/", httpOnly: true, sameSite: "lax", secure, maxAge: 60 });
+    if (keep) {
+      // What was typed (never a secret), so the form comes back filled in, with the error under its field.
+      const values = Object.fromEntries(Object.entries(keep.values).filter(([k, v]) => !SECRET_FIELD.test(k) && typeof v === "string").map(([k, v]) => [k, v.slice(0, 500)]));
+      let v = Buffer.from(JSON.stringify({ f: keep.form, v: values, e: keep.errors ?? {} })).toString("base64url");
+      if (v.length > 3000) v = Buffer.from(JSON.stringify({ f: keep.form, v: {}, e: keep.errors ?? {} })).toString("base64url");
+      reply.setCookie("nova_form", v, { path: "/", httpOnly: true, sameSite: "lax", secure, maxAge: 60 });
+    }
     return reply.redirect(to);
+  };
+  const takeForm = (req: FastifyRequest, reply: FastifyReply): FormState => {
+    const v = req.cookies.nova_form;
+    if (!v) return FormState.empty;
+    reply.clearCookie("nova_form", { path: "/" });
+    try {
+      const j = JSON.parse(Buffer.from(v, "base64url").toString("utf8")) as { f: unknown; v: unknown; e: unknown };
+      const strings = (o: unknown) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([, x]) => typeof x === "string")) as Record<string, string>;
+      return typeof j.f === "string" ? new FormState(j.f, strings(j.v), strings(j.e)) : FormState.empty;
+    } catch {
+      return FormState.empty;
+    }
   };
   const takeFlash = (req: FastifyRequest, reply: FastifyReply): Flash => {
     const v = req.cookies.nova_flash;
@@ -711,7 +733,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return render(req, reply, "Payment", html`<div style="max-width:560px;margin:40px auto">${panel({}, body)}</div>`);
   });
 
-  const helpers: Helpers = { render, form, back, takeFlash, signedIn, actor, ctx, mailLink, codeOnce, live, requireSudo, notify, billingDeps };
+  const helpers: Helpers = { render, form, back, takeFlash, takeForm, signedIn, actor, ctx, mailLink, codeOnce, live, requireSudo, notify, billingDeps };
   adminRoutes(app, d, helpers);
   peopleRoutes(app, d, helpers);
   settingsRoutes(app, d, helpers);
@@ -740,8 +762,10 @@ export function paymentBadge(status: string): Html {
 export type Helpers = {
   render: (req: FastifyRequest, reply: FastifyReply, title: string, body: Html, flash?: Flash, status?: number) => Promise<FastifyReply>;
   form: (req: FastifyRequest) => Form;
-  back: (reply: FastifyReply, to: string, flash: Flash) => FastifyReply;
+  back: (reply: FastifyReply, to: string, flash: Flash, keep?: Keep) => FastifyReply;
   takeFlash: (req: FastifyRequest, reply: FastifyReply) => Flash;
+  /** The form that came back after an error (values and field errors), if any. */
+  takeForm: (req: FastifyRequest, reply: FastifyReply) => FormState;
   signedIn: (req: FastifyRequest, reply: FastifyReply) => Session | null;
   actor: (s: Session, req: FastifyRequest) => subs.Actor;
   ctx: () => subs.Ctx;

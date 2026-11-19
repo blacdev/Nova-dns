@@ -91,9 +91,9 @@ export function formSection(title: string, sub: Html | string, fields: Html | st
   return html`<div class="fsec"><div class="fsec-text"><h3>${title}</h3><p>${sub}</p></div><div class="fsec-fields">${fields}</div></div>`;
 }
 
-/** A label, the field, and help under it. */
-export function field(o: { id: string; label: string; help?: Html | string; control: Html }): Html {
-  return html`<div class="field"><label for="${o.id}">${o.label}</label>${o.control}${o.help ? html`<p class="help">${o.help}</p>` : ""}</div>`;
+/** A label, the field, the error (a form that came back) and help under it. */
+export function field(o: { id: string; label: string; help?: Html | string; control: Html; error?: string }): Html {
+  return html`<div class="field${o.error ? " has-error" : ""}"><label for="${o.id}">${o.label}</label>${o.control}${o.error ? html`<p class="field-error" id="${o.id}-error">${o.error}</p>` : ""}${o.help ? html`<p class="help">${o.help}</p>` : ""}</div>`;
 }
 
 /** A list of facts: term and value. */
@@ -174,8 +174,9 @@ export function page(f: Frame, body: Html): string {
       <p class="auth-foot">Remote Studio addresses for Nova · ${f.rootDomain}</p></main></body></html>`.value;
   }
   const initial = (f.user.email[0] ?? "?").toUpperCase();
-  const who = html`<div class="who"><span class="avatar">${initial}</span><span class="who-text"><b title="${f.user.email}">${f.user.email}</b><small>${roleLabel(String(f.user.role))}</small></span>
-    <form method="post" action="/logout">${csrfField(f.csrf)}<button class="icon-btn" title="Sign out" aria-label="Sign out">${icon("logout")}</button></form></div>`;
+  const who = html`<details class="menu who-menu"><summary class="who" aria-haspopup="menu" aria-label="Your account"><span class="avatar">${initial}</span><span class="who-text"><b title="${f.user.email}">${f.user.email}</b><small>${roleLabel(String(f.user.role))}</small></span>${icon("menu", 16)}</summary>
+    <div class="menu-panel" role="menu"><a class="menu-item" role="menuitem" href="/account">${icon("user", 16)}<span>Account &amp; security</span></a>${f.billing ? html`<a class="menu-item" role="menuitem" href="/billing">${icon("card", 16)}<span>Billing</span></a>` : ""}
+      <div class="menu-sep" role="separator"></div><form method="post" action="/logout">${csrfField(f.csrf)}<button class="menu-item" role="menuitem">${icon("logout", 16)}<span>Sign out</span></button></form></div></details>`;
   return html`${head}<body class="app">
 <aside class="side">${brand}<nav aria-label="Main">${nav(f)}</nav>${who}</aside>
 <div class="main"><header class="top"><details class="mnav"><summary aria-label="Menu">${icon("menu")}</summary><div class="mnav-panel"><nav aria-label="Main">${nav(f)}</nav>${who}</div></details>${brand}</header>
@@ -237,7 +238,9 @@ body.app{display:grid;grid-template-columns:264px minmax(0,1fr);min-height:100vh
 .side nav a .ic,.mnav nav a .ic{color:var(--side-muted)}
 .side nav a:hover,.mnav nav a:hover{background:var(--side-hover);color:#fff}
 .side nav a[aria-current],.mnav nav a[aria-current]{background:var(--side-hover);color:#fff;box-shadow:inset 2px 0 0 #818cf8}.side nav a[aria-current] .ic,.mnav nav a[aria-current] .ic{color:#a5b4fc}
-.who{display:flex;align-items:center;gap:10px;padding:12px 8px 4px;border-top:1px solid var(--side-line);margin-top:8px}
+.who{display:flex;align-items:center;gap:10px;padding:12px 8px 8px;border-top:1px solid var(--side-line);margin-top:8px}
+summary.who{list-style:none;cursor:pointer;border-radius:8px;color:inherit}summary.who::-webkit-details-marker{display:none}summary.who:hover{background:var(--side-hover)}summary.who>.ic{color:var(--side-muted)}
+.who-menu{display:block}.who-menu .menu-panel{top:auto;bottom:calc(100% + 4px);left:0;right:0}
 .avatar{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#1f2a44;color:#c7d2fe;font-weight:600;flex:none}
 .who-text{display:flex;flex-direction:column;min-width:0;flex:1;line-height:1.25}.who-text b{color:#fff;font-weight:500;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.who-text small{color:var(--side-muted);font-size:12px}
 .icon-btn{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--side-muted);cursor:pointer}.icon-btn:hover{background:var(--side-hover);color:#fff}
@@ -304,7 +307,7 @@ label,.label{display:block;margin:0 0 6px;font-weight:500;font-size:13.5px;color
 label.inline-check{display:flex;gap:8px;align-items:center;font-weight:400;margin:8px 0 0;color:var(--ink-2)}label.inline-check input{accent-color:var(--accent);width:16px;height:16px}
 .input-group button.addon{border:0;border-left:1px solid var(--line);border-radius:0;box-shadow:none;min-height:0;font-weight:500;color:var(--ink-2);cursor:pointer}
 .field{margin-bottom:18px}.field:last-child{margin-bottom:0}.help{color:var(--muted);font-size:12.5px;margin:6px 0 0}
-input[type=text],input[type=email],input[type=password],input[type=search],input[type=number],input[type=url],input:not([type]),select,textarea{width:100%;max-width:100%;padding:9px 12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
+input[type=text],input[type=email],input[type=password],input[type=search],input[type=number],input[type=url],input[type=date],input:not([type]),select,textarea{width:100%;max-width:100%;padding:9px 12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
 input::placeholder{color:var(--muted);opacity:.8}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 18%,transparent)}
 select{appearance:none;padding-right:34px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
@@ -352,7 +355,6 @@ td .sub{display:block;color:var(--muted);font-size:12.5px}
 .card.flush>.card-body>table{margin:0}
 .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
 .toolbar form{display:flex;gap:8px;flex:1;max-width:520px}.toolbar input{flex:1}
-form[method=get]:not(.toolbar form){display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
 
 /* ---------- facts, stats, empty */
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0;margin:0}
@@ -407,6 +409,67 @@ body.auth{min-height:100vh;display:grid;place-items:center;padding:32px 16px;bac
 .tabs{display:none}
 @media(max-width:640px){.wide-only{display:none}.card-head,.card>.card-body,.card:not(:has(>.card-body)){padding-left:16px;padding-right:16px}.card-foot{padding:12px 16px}
 th,td{padding:10px 12px}td b,td a{overflow-wrap:anywhere}td.actions .btn,td.actions button{padding:4px 8px}.page-head h1{font-size:21px}}
+/* ---------- form errors, helpers */
+.field.has-error input,.field.has-error select,.field.has-error textarea,.field.has-error .input-group{border-color:var(--bad)}
+.field.has-error input:focus{box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 18%,transparent)}
+.field.has-error .input-group input{border:0}
+.field-error{color:var(--bad);font-size:12.5px;font-weight:500;margin:6px 0 0}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.w-auto{width:auto!important}
+button[disabled]{opacity:.55;cursor:not-allowed}
+button.is-busy,.btn.is-busy{pointer-events:none;opacity:.8}
+button.is-busy::before{content:"";width:13px;height:13px;flex:none;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---------- dialogs */
+dialog.modal{width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:0;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--ink);box-shadow:0 24px 48px -12px rgba(16,24,40,.3)}
+dialog.modal::backdrop{background:rgba(12,17,29,.55)}
+dialog.modal[open]{animation:pop .14s ease-out}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.98)}}
+.modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:18px 20px 0}
+.modal-head h2{font-size:17px;font-weight:650;margin:0}
+.modal .close{color:var(--muted);font-size:22px;line-height:1;width:32px;height:32px}.modal .close:hover{background:var(--neutral-soft);color:var(--ink)}
+.modal-body{padding:12px 20px 4px}.modal-text{color:var(--ink-2);margin-bottom:14px}.modal-text p:last-child{margin:0}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:16px 20px 18px}
+.modal.danger .modal-head h2{color:var(--bad)}
+
+/* ---------- menus */
+.menu{position:relative;display:inline-block;text-align:left;vertical-align:middle}
+.menu>summary{list-style:none;cursor:pointer}.menu>summary::-webkit-details-marker{display:none}
+.btn.kebab{padding:4px 7px;min-width:32px;color:var(--muted)}.menu[open]>summary.btn{background:var(--neutral-soft)}
+.menu-panel{position:absolute;right:0;top:calc(100% + 4px);z-index:60;min-width:210px;max-width:min(320px,calc(100vw - 24px));padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-lg)}
+.menu-panel form{display:block;margin:0}
+.menu-panel .menu-item{display:flex;align-items:center;gap:10px;width:100%;min-height:0;padding:8px 10px;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--ink-2);font:inherit;font-weight:500;font-size:13.5px;text-align:left;justify-content:flex-start;white-space:nowrap;cursor:pointer;text-decoration:none!important}
+.menu-panel .menu-item:hover,.menu-panel .menu-item:focus-visible{background:var(--neutral-soft);color:var(--ink);outline:none}
+.menu-panel .menu-item .ic{color:var(--muted)}
+.menu-panel .menu-item.danger,.menu-panel .menu-item.danger .ic{color:var(--bad)}.menu-panel .menu-item.danger:hover{background:var(--bad-soft)}
+.menu-sep{height:1px;background:var(--line);margin:5px 2px}
+
+/* ---------- filters and pages */
+.filters{display:flex;gap:10px 14px;flex-wrap:wrap;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+.filter-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1;margin:0}
+.filter-form .search{display:flex;gap:8px;flex:1;min-width:200px;max-width:420px}
+.filter-form select,.filter-form input[type=date]{width:auto;padding:6px 10px;font-size:13px}.filter-form select{padding-right:30px}
+.dates{display:inline-flex;gap:6px;align-items:center}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip-link{display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);font-size:12.5px;font-weight:500;text-decoration:none!important}
+.chip-link:hover{background:var(--neutral-soft)}
+.chip-link.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent)}
+.pager{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--line);background:var(--surface-2);font-size:13px}
+.pager-info{color:var(--muted);flex:1;min-width:180px}
+.pager-pages{display:flex;gap:4px;flex-wrap:wrap}
+.pg{display:inline-grid;place-items:center;min-width:32px;height:32px;padding:0 9px;border-radius:7px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);font-weight:500;text-decoration:none!important}
+a.pg:hover{background:var(--neutral-soft)}.pg.cur{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.pg.off{opacity:.45}.pg.gap{border-color:transparent;background:transparent;min-width:16px;padding:0}
+.pager-per{margin:0}.pager-per select{width:auto;padding:5px 30px 5px 10px;font-size:13px}
+details.meta summary{cursor:pointer;color:var(--accent);font-size:12.5px}details.meta pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-all;font-size:12px;background:var(--surface-2);padding:8px;border-radius:6px;max-width:420px}
+
+/* ---------- segmented control */
+.seg{display:inline-flex;padding:3px;gap:2px;border:1px solid var(--line-2);border-radius:9px;background:var(--surface-2)}
+.seg label{position:relative;margin:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:500;color:var(--ink-2)}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg label:has(input:checked){background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(16,24,40,.12),0 0 0 1px var(--line)}
+.seg label:has(input:focus-visible){outline:3px solid var(--focus)}
 `;
 
 /** The page's small behaviours, served from /static/app.js (the CSP allows no inline script). */
@@ -437,9 +500,128 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", () => {
     navigator.clipboard.writeText(b.getAttribute("data-copy")).then(() => { const t = b.textContent; b.textContent = "Copied"; setTimeout(() => { b.textContent = t; }, 1600); });
   }));
-  document.querySelectorAll("form[data-confirm]").forEach((f) => f.addEventListener("submit", (e) => {
-    if (!confirm(f.getAttribute("data-confirm"))) e.preventDefault();
+  // ---- dialogs: [data-open] opens one, [data-close] or the backdrop closes it.
+  const openDialog = (d) => {
+    if (!d || d.open) return;
+    d.showModal();
+    const first = d.querySelector("[autofocus], .modal-body input:not([type=hidden]), .modal-body select, .modal-body textarea");
+    if (first) first.focus();
+  };
+  document.addEventListener("click", (e) => {
+    const o = e.target.closest("[data-open]");
+    if (o) {
+      const m = o.closest("details.menu");
+      if (m) m.removeAttribute("open");
+      openDialog(document.getElementById(o.getAttribute("data-open")));
+      return;
+    }
+    const c = e.target.closest("[data-close]");
+    if (c && c.closest("dialog")) c.closest("dialog").close();
+  });
+  document.querySelectorAll("dialog.modal").forEach((d) => {
+    d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+    if (d.hasAttribute("data-open-now")) openDialog(d);
+  });
+  // A typed confirmation: the button works once the text matches.
+  document.querySelectorAll("input[data-typed]").forEach((i) => {
+    const b = i.form && i.form.querySelector("[data-typed-submit]");
+    const check = () => { if (b) b.disabled = i.value.trim().toLowerCase() !== i.getAttribute("data-typed").toLowerCase(); };
+    i.addEventListener("input", check);
+    check();
+  });
+  // form[data-confirm]: asked in a dialog first (data-confirm-title, data-confirm-ok; red for a danger button).
+  const ask = document.createElement("dialog");
+  ask.className = "modal";
+  ask.setAttribute("aria-labelledby", "confirm-title");
+  ask.innerHTML = '<div class="modal-head"><h2 id="confirm-title"></h2><button type="button" class="icon-btn close" data-close aria-label="Close">&times;</button></div>'
+    + '<div class="modal-body"><p class="modal-text"></p></div><div class="modal-foot"><button type="button" class="ghost" data-close>Cancel</button><button type="button" data-ok>OK</button></div>';
+  document.body.appendChild(ask);
+  ask.addEventListener("click", (e) => { if (e.target === ask) ask.close(); });
+  let pending = null;
+  ask.querySelector("[data-ok]").addEventListener("click", () => {
+    const p = pending;
+    pending = null;
+    ask.close();
+    if (p) { p.form.dataset.confirmed = "1"; p.submitter ? p.form.requestSubmit(p.submitter) : p.form.requestSubmit(); }
+  });
+  document.addEventListener("submit", (e) => {
+    const f = e.target;
+    if (!f.hasAttribute("data-confirm") || f.dataset.confirmed) return;
+    e.preventDefault();
+    const sub = e.submitter;
+    const m = f.closest("details.menu") || (sub && sub.closest("details.menu"));
+    if (m) m.removeAttribute("open");
+    const danger = f.hasAttribute("data-danger") || (sub && /danger/.test(sub.className));
+    ask.querySelector("h2").textContent = f.getAttribute("data-confirm-title") || "Are you sure?";
+    ask.querySelector(".modal-text").textContent = f.getAttribute("data-confirm");
+    const ok = ask.querySelector("[data-ok]");
+    ok.textContent = f.getAttribute("data-confirm-ok") || (sub && sub.textContent.trim()) || "Continue";
+    ok.className = danger ? "danger-solid" : "primary";
+    ask.classList.toggle("danger", !!danger);
+    pending = { form: f, submitter: sub };
+    ask.showModal();
+    ok.focus();
+  });
+  // A form being sent: its button shows it, and a second click does nothing.
+  document.addEventListener("submit", (e) => {
+    const f = e.target;
+    if (e.defaultPrevented || f.method === "get") return;
+    if (f.dataset.busy) { e.preventDefault(); return; }
+    f.dataset.busy = "1";
+    if (e.submitter) { e.submitter.classList.add("is-busy"); e.submitter.setAttribute("aria-busy", "true"); }
+  });
+  window.addEventListener("pageshow", () => document.querySelectorAll("form[data-busy], form[data-confirmed]").forEach((f) => {
+    delete f.dataset.busy;
+    delete f.dataset.confirmed;
+    f.querySelectorAll(".is-busy").forEach((b) => { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); });
+    document.querySelectorAll("button.is-busy").forEach((b) => { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); });
   }));
+  // Filters and the page size apply as soon as they change (the search box waits for Enter).
+  document.querySelectorAll("form[data-autosubmit]").forEach((f) => f.addEventListener("change", (e) => {
+    if (e.target.matches("[data-no-autosubmit]")) return;
+    f.requestSubmit();
+  }));
+  // ---- menus: one open at a time, placed so a scrolling table does not cut them off.
+  const openMenus = () => document.querySelectorAll("details.menu[open]");
+  const place = (d) => {
+    const p = d.querySelector(".menu-panel"), s = d.querySelector("summary");
+    if (!p || !s) return;
+    const r = s.getBoundingClientRect(), who = d.classList.contains("who-menu");
+    p.style.position = "fixed"; p.style.right = "auto"; p.style.bottom = "auto";
+    if (who) p.style.width = Math.max(r.width, 220) + "px";
+    const w = p.offsetWidth, h = p.offsetHeight;
+    const left = Math.max(8, Math.min(who ? r.left : r.right - w, window.innerWidth - w - 8));
+    let top = r.bottom + 4;
+    if (top + h > window.innerHeight - 8 && r.top - h - 4 > 8) top = r.top - h - 4;
+    p.style.left = left + "px"; p.style.top = top + "px";
+  };
+  document.querySelectorAll("details.menu").forEach((d) => d.addEventListener("toggle", () => {
+    if (!d.open) return;
+    openMenus().forEach((o) => { if (o !== d) o.removeAttribute("open"); });
+    place(d);
+  }));
+  document.addEventListener("click", (e) => {
+    openMenus().forEach((d) => { if (!d.contains(e.target)) d.removeAttribute("open"); });
+    const mn = document.querySelector("details.mnav[open]");
+    if (mn && !mn.contains(e.target)) mn.removeAttribute("open");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const open = (e.target.closest && e.target.closest("details.menu[open], details.mnav[open]")) || document.querySelector("details.menu[open], details.mnav[open]");
+      if (open && !document.querySelector("dialog[open]")) { open.removeAttribute("open"); const s = open.querySelector("summary"); if (s) s.focus(); }
+      return;
+    }
+    const d = e.target.closest && e.target.closest("details.menu[open]");
+    if (d && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      const items = [...d.querySelectorAll(".menu-item")];
+      if (!items.length) return;
+      const i = items.indexOf(document.activeElement);
+      items[e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length].focus();
+      e.preventDefault();
+    }
+  });
+  window.addEventListener("resize", () => openMenus().forEach((d) => d.removeAttribute("open")));
+  window.addEventListener("scroll", () => openMenus().forEach(place), true);
   // Email settings: a provider fills in the server; the security sets its usual port.
   const smtp = document.querySelector("form[data-smtp]");
   if (smtp) {
