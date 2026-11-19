@@ -452,3 +452,54 @@ describe("lists", () => {
     expect((await chief.get("/admin/billing?status=paid&q=ref_det")).body).not.toContain("ref_detail");
   });
 });
+
+describe("admin changes", () => {
+  it("a plan form keeps what was typed, and the default plan cannot be deleted", async () => {
+    await chief.post("/admin/plans", { name: "Kept plan", limit: "3", price: "9.999", currency: "USD", period: "year" }, "/admin/plans/new");
+    const page = (await chief.get("/admin/plans/new")).body;
+    expect(page).toContain('value="Kept plan"');
+    expect(page).toContain('value="9.999"');
+    expect(page).toContain('class="field-error" id="price-error">Write the price like 19.99.');
+    expect(page).toMatch(/value="year" checked/);
+    const def = (await db.query<{ id: number }>("SELECT id FROM plans WHERE is_default")).rows[0].id;
+    await chief.post(`/admin/plans/${def}/delete`, {}, `/admin/plans/${def}`);
+    expect(await chief.flash(`/admin/plans/${def}`)).toContain("cannot be deleted");
+    expect((await db.query("SELECT 1 FROM plans WHERE id = $1", [def])).rowCount).toBe(1);
+  });
+
+  it("an added person is invited until they sign in; the invitation can be sent again", async () => {
+    await chief.post("/admin/users", { email: "invitee@example.test", plan: "" }, "/admin/users");
+    const id = await idOf("invitee@example.test");
+    expect((await chief.get("/admin/users?show=invited")).body).toContain("invitee@example.test");
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("Resend the invitation");
+    const before = mails.length;
+    await chief.post(`/admin/users/${id}/reset`, {}, `/admin/users/${id}`);
+    expect(await chief.flash(`/admin/users/${id}`)).toContain("new invitation");
+    expect(mails.length).toBe(before + 1);
+    expect(mails.at(-1)!.text).toContain("Open this link within 3 days");
+    // The earlier link no longer works.
+    expect((await db.query("SELECT count(*)::int AS n FROM email_tokens WHERE user_id = $1 AND used_at IS NULL", [id])).rows[0].n).toBe(1);
+  });
+
+  it("an admin changes someone's email: confirmed again, old address told", async () => {
+    await person(db, "oldaddr@example.test");
+    const id = await idOf("oldaddr@example.test");
+    await chief.post(`/admin/users/${id}/email`, { email: "chief@example.test" }, `/admin/users/${id}`);
+    expect((await chief.get(`/admin/users/${id}`)).body).toContain("There is already an account for chief@example.test");
+    await chief.post(`/admin/users/${id}/email`, { email: "NewAddr@example.test" }, `/admin/users/${id}`);
+    const u = (await db.query("SELECT email, email_verified_at FROM users WHERE id = $1", [id])).rows[0];
+    expect(u).toEqual({ email: "newaddr@example.test", email_verified_at: null });
+    expect(mails.some((m) => m.to === "oldaddr@example.test" && m.subject.includes("email address was changed"))).toBe(true);
+    expect(mails.some((m) => m.to === "newaddr@example.test" && m.text.includes("/verify?token="))).toBe(true);
+  });
+
+  it("the email settings come back as typed after a test, asking for the password again", async () => {
+    await chief.sudo("/admin/settings");
+    await chief.post("/admin/settings/test-mail", { smtpHost: "mail.example.test", smtpSecurity: "ssl", smtpPort: "465", smtpUser: "me@example.test", smtpPassword: "typed-secret", mailFromName: "Nova", mailFromEmail: "me@example.test", testTo: "chief@example.test" }, "/admin/settings");
+    const page = (await chief.get("/admin/settings")).body;
+    expect(page).toContain('value="mail.example.test"');
+    expect(page).toContain("Type the password again to save it");
+    expect(page).not.toContain("typed-secret");
+    expect(p.config.smtpHost).not.toBe("mail.example.test");
+  });
+});

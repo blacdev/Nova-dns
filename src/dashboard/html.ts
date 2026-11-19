@@ -552,6 +552,15 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("submit", (e) => {
     const f = e.target;
     if (!f.hasAttribute("data-confirm") || f.dataset.confirmed) return;
+    // data-confirm-when="name=value": ask only when the form is about to save that choice.
+    // data-confirm-unless="name=value": not when it keeps that choice.
+    const chosen = (rule) => {
+      const i = rule.indexOf("="), name = rule.slice(0, i), value = rule.slice(i + 1);
+      const el = [...f.querySelectorAll("[name]")].find((x) => x.name === name && (x.type !== "radio" || x.checked));
+      return !!el && el.value === value;
+    };
+    if (f.hasAttribute("data-confirm-when") && !chosen(f.getAttribute("data-confirm-when"))) return;
+    if (f.hasAttribute("data-confirm-unless") && chosen(f.getAttribute("data-confirm-unless"))) return;
     e.preventDefault();
     const sub = e.submitter;
     const m = f.closest("details.menu") || (sub && sub.closest("details.menu"));

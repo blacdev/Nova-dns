@@ -78,7 +78,7 @@ export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers
         <form method="post" action="/admin/billing/switch"${b.enabled ? html` data-confirm="Turn payments off? Owners will no longer see Billing."` : ""}>${csrfField(s.csrf)}<input type="hidden" name="on" value="${b.enabled ? "0" : "1"}">
           <button class="${b.enabled ? "danger" : "primary"}">${b.enabled ? "Turn payments off" : "Turn payments on"}</button></form></div>`)}
 
-      <form method="post" action="/admin/billing/provider">${csrfField(s.csrf)}${panel({ title: "Payment provider", sub: "The one provider that takes new payments. Each keeps its own keys, so you can switch back and forth." }, html`
+      <form method="post" action="/admin/billing/provider"${active ? html` data-confirm="New payments will go through the provider you selected. Payments already made stay where they are, and ${PROVIDER_INFO[active].name}'s keys are kept." data-confirm-title="Switch the payment provider?" data-confirm-ok="Switch provider" data-confirm-unless="provider=${active}"` : ""}>${csrfField(s.csrf)}${panel({ title: "Payment provider", sub: "The one provider that takes new payments. Each keeps its own keys, so you can switch back and forth." }, html`
         <div class="options">${PROVIDERS.map((p) => html`<label class="option"><input type="radio" name="provider" value="${p}"${p === active ? " checked" : ""}>
           ${modeBadge(p)}<b>${PROVIDER_INFO[p].name}</b><span>${PROVIDER_INFO[p].blurb}</span></label>`)}</div>`,
         html`<button class="primary">Use selected provider</button>`)}</form>

@@ -53,10 +53,10 @@ choice, and it can only be tested after saving.
 
 ## Phase 3 — Admin CRUD gaps
 
-- [ ] 16. **S** Plan form keeps values and shows field errors; the default plan cannot be deleted; delete in a modal stating how many people move.
-- [ ] 17. **M** Edit a person's email (new address must be confirmed; old address told); "Invited" state; "Resend invite".
+- [x] 16. **S** Plan form keeps values and shows field errors; the default plan cannot be deleted; delete in a modal stating how many people move.
+- [x] 17. **M** Edit a person's email (new address must be confirmed; old address told); "Invited" state; "Resend invite".
 - [x] 18. **S** Edit a reserved/blocked name (kind, reason); adding one that exists warns instead of overwriting.
-- [ ] 19. **S** Payment detail page; Role, Name kind, DNS provider and certificate environment as radio cards; confirmations for provider switch, DNS → None, production certificates.
+- [x] 19. **S** Payment detail page; Role, Name kind, DNS provider and certificate environment as radio cards; confirmations for provider switch, DNS → None, production certificates.
 
 ## Phase 4 — Station-owner side
 
