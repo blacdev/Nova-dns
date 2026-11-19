@@ -81,9 +81,15 @@ the super admin (see below).
 - **Plans** (Admin > Plans) set how many stations a person may have; one is the default.
   On a person's page an admin picks their plan or sets their own limit, which wins.
   Without plans, `SUBDOMAIN_LIMIT` applies.
-- **People and stations**: admins add people (they get an email to choose a password),
-  confirm emails, send reset links, turn off a lost second factor, suspend, delete; create
-  a station for someone and move a station to another owner (its access code is replaced).
+- **People and stations**: admins add people (they get an email to choose a password and
+  show as Invited until they sign in; the invitation can be sent again), change someone's
+  email, confirm emails, send reset links, turn off a lost second factor, suspend, delete;
+  create a station for someone and move a station to another owner (its access code is
+  replaced). Every admin list pages through its rows and filters them (search, status,
+  dates), with row actions in a menu and confirmations in dialogs.
+- **Accounts**: two-step sign-in comes with ten single-use recovery codes (shown once,
+  renewable); people change their own email (through a link to the new address) and
+  delete their own account (the super admin hands over the role first).
 - **Settings** (Admin > Settings): the Cloudflare token and zone, the SMTP server (host,
   port, SSL/TLS or STARTTLS, username, password, with presets for common providers and a
   test email that uses the values before they are saved) and sender, the Let's Encrypt email, staging or production, and the weekly certificate

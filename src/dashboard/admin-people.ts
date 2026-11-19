@@ -329,6 +329,7 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
   });
   accountAction("totp-off", async (s, u, req, reply, to) => {
     await d.db.query("UPDATE users SET totp_secret_enc = NULL WHERE id = $1", [u.id]);
+    await d.db.query("DELETE FROM recovery_codes WHERE user_id = $1", [u.id]);
     await d.db.query("DELETE FROM sessions WHERE user_id = $1", [u.id]);
     await audit(d.db, { actor: s.user.id, action: "user.totp_off", target: u.email, ip: req.ip, metadata: { admin: true } });
     void h.notify(u.email, "Two-step sign-in was turned off", "An administrator turned off two-step sign-in for your account and signed you out everywhere. Turn it on again from Account & security.");
@@ -395,10 +396,10 @@ export function peopleRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return h.render(req, reply, "Plans", html`${pageHead({ title: "Plans", sub: "A plan sets how many stations a person may have. Give a plan a price to sell it when payments are on.",
         actions: html`<a class="btn primary" href="/admin/plans/new">${icon("plus", 16)} New plan</a>` })}
       <div class="callout info">${icon("info")}<div><b>Who is on which plan</b><p>People without a plan are on the default plan${def ? html` (<b>${def.name}</b>)` : html`; there is none, so they may have ${stationWord(d.config.subdomainLimit)} (SUBDOMAIN_LIMIT)`}: ${unplanned} ${unplanned === 1 ? "person" : "people"}. A limit set on a person's page wins over any plan.</p></div></div>
-      ${panel({ flush: true }, all.length ? html`<div class="table-wrap"><table><tr><th>Plan</th><th class="num">Stations</th><th>Price</th><th class="num">People</th><th class="actions"></th></tr>${all.map((p) => html`<tr>
+      ${panel({ flush: true }, all.length ? table(["Plan", { text: "Stations", cls: "num" }, "Price", { text: "People", cls: "num" }, { text: "", cls: "actions" }], all.map((p) => html`<tr>
         <td><a href="/admin/plans/${p.id}"><b>${p.name}</b></a> ${p.is_default ? badge("accent", "Default") : ""}${p.description ? html`<span class="sub">${p.description}</span>` : ""}</td>
         <td class="num">${p.station_limit}</td><td>${p.price_minor ? badge("ok", priceText(p)) : badge("neutral", "Not for sale")}</td><td class="num">${p.people}</td>
-        <td class="actions">${menu([menuLink(`/admin/plans/${p.id}`, "Edit", "sliders"), p.is_default ? "" : menuLink(`/admin/plans/${p.id}#delete-plan`, "Delete…", "alert")], { aria: `Actions for ${p.name}` })}</td></tr>`)}</table></div>`
+        <td class="actions">${menu([menuLink(`/admin/plans/${p.id}`, "Edit", "sliders"), p.is_default ? "" : menuLink(`/admin/plans/${p.id}#delete-plan`, "Delete…", "alert")], { aria: `Actions for ${p.name}` })}</td></tr>`))
         : emptyState("No plans yet", "Create a plan to give people more stations, or to sell more.", html`<a class="btn primary" href="/admin/plans/new">New plan</a>`))}`, h.takeFlash(req, reply));
   });
 

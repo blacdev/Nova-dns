@@ -28,8 +28,9 @@ import { adminRoutes } from "./admin.js";
 import { peopleRoutes } from "./admin-people.js";
 import { settingsRoutes } from "./admin-settings.js";
 import { billingAdminRoutes } from "./admin-billing.js";
-import { APP_JS, badge, bytes, csrfField, day, emptyState, facts, field, html, icon, page, pageHead, panel, when, type Html } from "./html.js";
-import { FormState, SECRET_FIELD } from "./ui.js";
+import { randomInt } from "node:crypto";
+import { APP_JS, badge, bytes, csrfField, day, emptyState, facts, field, html, icon, page, pageHead, panel, raw, when, type Html } from "./html.js";
+import { FormState, modal, opener, pageOf, paged, pager, SECRET_FIELD, table } from "./ui.js";
 import { cookieNames, csrfOk, elevate, endSession, loadSession, preToken, startSession, SUDO_MINUTES, type Session } from "./session.js";
 
 export interface DashDeps {
@@ -57,6 +58,18 @@ declare module "fastify" {
     session: Session | null;
   }
 }
+
+/** Recovery codes: no 0/o, 1/l/i look-alikes. */
+const RECOVERY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+const normRecovery = (c: string) => c.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** A password box with a Show button. */
+const passwordInput = (id: string, name: string, attrs: string) =>
+  html`<div class="input-group"><input id="${id}" type="password" name="${name}" ${raw(attrs)}><button type="button" class="addon reveal" data-reveal="${id}" aria-label="Show password">Show</button></div>`;
+
+/** The code box: 6 digits from the app, or a recovery code. */
+const codeInput = (id: string, extra = "") =>
+  html`<input id="${id}" name="code" inputmode="text" autocomplete="one-time-code" required maxlength="12" spellcheck="false" autocapitalize="off" ${raw(extra)}>`;
 
 export const MIN_PASSWORD = 10;
 export const MAX_PASSWORD = 200;
@@ -202,6 +215,33 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return d.mail({ to: email, subject, text }).then(() => true, () => false);
   }
 
+  /** Ten single-use recovery codes (shown once); the earlier set stops working. */
+  async function makeRecoveryCodes(userId: number): Promise<string[]> {
+    const codes = Array.from({ length: 10 }, () => {
+      const c = Array.from({ length: 10 }, () => RECOVERY_ALPHABET[randomInt(RECOVERY_ALPHABET.length)]).join("");
+      return `${c.slice(0, 5)}-${c.slice(5)}`;
+    });
+    await transaction(d.db, async (tx) => {
+      await tx.query("DELETE FROM recovery_codes WHERE user_id = $1", [userId]);
+      for (const c of codes) await tx.query("INSERT INTO recovery_codes (user_id, code_hash) VALUES ($1, $2)", [userId, tokenHash(normRecovery(c))]);
+    });
+    return codes;
+  }
+
+  /** A code from the authenticator app, or one recovery code (used up). */
+  async function secondFactor(userId: number, enc: string | null, code: unknown): Promise<"totp" | "recovery" | null> {
+    if (enc && verifyTotp(decrypt(d.config.sessionSecret, enc), String(code ?? ""))) return "totp";
+    const n = normRecovery(String(code ?? ""));
+    if (n.length !== 10) return null;
+    const r = await d.db.query("UPDATE recovery_codes SET used_at = now() WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL RETURNING id", [userId, tokenHash(n)]);
+    if (!r.rowCount) return null;
+    const left = Number((await d.db.query("SELECT count(*) AS n FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL", [userId])).rows[0].n);
+    const email = (await d.db.query<{ email: string }>("SELECT email FROM users WHERE id = $1", [userId])).rows[0]?.email;
+    await audit(d.db, { actor: userId, action: "user.recovery_code_used", metadata: { left } });
+    if (email) void notify(email, "A recovery code was used", `One of your two-step recovery codes was used to sign in. ${left} ${left === 1 ? "is" : "are"} left; make new ones on Account & security if you are running low.`);
+    return "recovery";
+  }
+
   async function useToken(token: string, kind: "verify" | "reset"): Promise<number | null> {
     const r = await d.db.query<{ user_id: number }>(
       "UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now() RETURNING user_id",
@@ -221,7 +261,8 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     render(req, reply, "Create account", authCard("Create your account", "Claim your station's address, then connect Nova to it.", html`
       <form method="post" action="/signup">${pre(req, reply)}
         ${field({ id: "email", label: "Email", control: html`<input id="email" type="email" name="email" value="${email}" required autocomplete="email" maxlength="254">` })}
-        ${field({ id: "password", label: "Password", help: `${MIN_PASSWORD} characters or more.`, control: html`<input id="password" type="password" name="password" required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password">` })}
+        ${field({ id: "password", label: "Password", help: `${MIN_PASSWORD} characters or more.`, control: passwordInput("password", "password", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
+        ${field({ id: "password2", label: "Password again", control: passwordInput("password2", "password2", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
         <button class="primary">Create account</button></form>`, html`<span class="dim">Have an account?</span><a href="/login">Sign in</a>`), flash, status);
 
   app.get("/signup", async (req, reply) => signupForm(req, reply));
@@ -232,6 +273,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return signupForm(req, reply, email, { kind: "bad", text: "That is not an email address." }, 400);
     const weak = passwordProblem(String(f.password ?? ""), email);
     if (weak) return signupForm(req, reply, email, { kind: "bad", text: weak }, 400);
+    if (f.password2 !== undefined && f.password2 !== f.password) return signupForm(req, reply, email, { kind: "bad", text: "The two passwords are not the same." }, 400);
     const hash = await hashSecret(String(f.password));
     // The very first account is the super admin; ADMIN_EMAILS (optional) become admins with every permission.
     const made = await transaction(d.db, async (tx) => {
@@ -258,7 +300,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     render(req, reply, "Sign in", authCard("Sign in", "Welcome back.", html`
       <form method="post" action="/login">${pre(req, reply)}<input type="hidden" name="next" value="${safeNext((req.query as Form).next ?? form(req).next)}">
         ${field({ id: "email", label: "Email", control: html`<input id="email" type="email" name="email" value="${email}" required autocomplete="username" maxlength="254">` })}
-        ${field({ id: "password", label: "Password", control: html`<input id="password" type="password" name="password" required autocomplete="current-password" maxlength="${MAX_PASSWORD}">` })}
+        ${field({ id: "password", label: "Password", control: passwordInput("password", "password", `required autocomplete="current-password" maxlength="${MAX_PASSWORD}"`) })}
         <button class="primary">Sign in</button></form>`, html`<a href="/forgot">Forgot your password?</a><a href="/signup">Create an account</a>`), flash, status);
 
   app.get("/login", async (req, reply) => loginForm(req, reply, "", takeFlash(req, reply)));
@@ -292,7 +334,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     if (!req.session?.needsTotp) return reply.redirect("/");
     return render(req, reply, "Two-step sign-in", authCard("Two-step sign-in", "Enter the 6-digit code from your authenticator app.", html`
       <form method="post" action="/login/totp">${csrfField(req.session.csrf)}<input type="hidden" name="next" value="${safeNext((req.query as Form).next)}">
-        ${field({ id: "code", label: "Code", control: html`<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9 ]{6,7}" maxlength="7" autofocus>` })}
+        ${field({ id: "code", label: "Code", help: "Lost your phone? Enter one of your recovery codes instead.", control: codeInput("code", "autofocus") })}
         <button class="primary">Verify</button></form>`, html`<span></span><form method="post" action="/logout">${csrfField(req.session.csrf)}<button class="ghost sm">Use another account</button></form>`));
   });
   app.post("/login/totp", async (req, reply) => {
@@ -300,12 +342,14 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     if (!s?.needsTotp) return reply.redirect("/");
     if (!(await hit(d.db, `totp:${s.user.id}`, LIMITS.totp)).ok) return render(req, reply, "Two-step sign-in", authCard("Too many tries", "Wait 10 minutes, then try again.", ""), null, 429);
     const enc = (await d.db.query("SELECT totp_secret_enc FROM users WHERE id = $1", [s.user.id])).rows[0]?.totp_secret_enc;
-    if (!enc || !verifyTotp(decrypt(d.config.sessionSecret, enc), form(req).code)) {
-      return render(req, reply, "Two-step sign-in", authCard("That code is not right", "Codes change every 30 seconds; use the newest one.", html`<a class="btn primary" href="/login/totp">Try again</a>`), { kind: "bad", text: "Wrong code." }, 401);
+    const how = enc ? await secondFactor(s.user.id, enc, form(req).code) : null;
+    if (!how) {
+      return render(req, reply, "Two-step sign-in", authCard("That code is not right", "Codes change every 30 seconds; use the newest one, or a recovery code.", html`<a class="btn primary" href="/login/totp">Try again</a>`), { kind: "bad", text: "Wrong code." }, 401);
     }
     await d.db.query("UPDATE sessions SET needs_totp = false, elevated_until = now() + make_interval(mins => $2) WHERE token_hash = $1", [s.tokenHash, SUDO_MINUTES]);
     await forget(d.db, `totp:${s.user.id}`);
     await signedInNow(s.user.id, req.ip);
+    if (how === "recovery") return back(reply, "/account", { kind: "ok", text: "Signed in with a recovery code: it cannot be used again. Make new codes below if you are running low, or set up your new phone." });
     return reply.redirect(safeNext(form(req).next));
   });
 
@@ -323,8 +367,8 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return render(req, reply, "Confirm it is you", html`${pageHead({ title: "Confirm it is you", sub: `This is a sensitive area. Confirm your identity to continue; you will not be asked again for ${SUDO_MINUTES} minutes.` })}
       <div style="max-width:480px">${panel({}, html`<form method="post" action="/sudo">${csrfField(s.csrf)}<input type="hidden" name="next" value="${next}">
         ${field({ id: "sudo-email", label: "Account", control: html`<input id="sudo-email" value="${s.user.email}" disabled>` })}
-        ${field({ id: "password", label: "Password", control: html`<input id="password" type="password" name="password" required autocomplete="current-password" maxlength="${MAX_PASSWORD}" autofocus>` })}
-        ${s.user.totp ? field({ id: "code", label: "Authenticator code", control: html`<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9 ]{6,7}" maxlength="7">` }) : ""}
+        ${field({ id: "password", label: "Password", control: passwordInput("password", "password", `required autocomplete="current-password" maxlength="${MAX_PASSWORD}" autofocus`) })}
+        ${s.user.totp ? field({ id: "code", label: "Authenticator code", help: "Or one of your recovery codes.", control: codeInput("code") }) : ""}
         <div class="row"><button class="primary">${icon("lock", 16)} Confirm</button><a class="btn ghost" href="/">Cancel</a></div></form>`)}</div>`, takeFlash(req, reply));
   });
   app.post("/sudo", async (req, reply) => {
@@ -339,7 +383,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       await audit(d.db, { actor: s.user.id, action: "user.sudo_failed", ip: req.ip });
       return again("That password is not right.");
     }
-    if (u.totp_secret_enc && !verifyTotp(decrypt(d.config.sessionSecret, u.totp_secret_enc), f.code)) return again("That code is not right; use the newest one.");
+    if (u.totp_secret_enc && !(await secondFactor(s.user.id, u.totp_secret_enc, f.code))) return again("That code is not right; use the newest one.");
     await elevate(d.db, s);
     await forget(d.db, `sudo:${s.user.id}`);
     await audit(d.db, { actor: s.user.id, action: "user.sudo", ip: req.ip });
@@ -373,12 +417,14 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
   });
   app.get("/reset", async (req, reply) => render(req, reply, "New password", authCard("Choose a new password", "You will be signed out everywhere else.", html`
     <form method="post" action="/reset">${pre(req, reply)}<input type="hidden" name="token" value="${(req.query as Form).token ?? ""}">
-    ${field({ id: "password", label: "New password", help: `${MIN_PASSWORD} characters or more.`, control: html`<input id="password" type="password" name="password" required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password">` })}
+    ${field({ id: "password", label: "New password", help: `${MIN_PASSWORD} characters or more.`, control: passwordInput("password", "password", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
+    ${field({ id: "password2", label: "New password again", control: passwordInput("password2", "password2", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
     <button class="primary">Save password</button></form>`)));
   app.post("/reset", async (req, reply) => {
     const f = form(req);
     const password = String(f.password ?? "");
     if (password.length < MIN_PASSWORD || password.length > MAX_PASSWORD) return render(req, reply, "New password", authCard("Choose another password", `Use ${MIN_PASSWORD} to ${MAX_PASSWORD} characters.`, html`<a class="btn primary" href="/reset?token=${f.token ?? ""}">Back</a>`), null, 400);
+    if (f.password2 !== undefined && f.password2 !== password) return render(req, reply, "New password", authCard("The passwords are not the same", "Type the same new password in both boxes.", html`<a class="btn primary" href="/reset?token=${f.token ?? ""}">Back</a>`), null, 400);
     const id = await useToken(f.token, "reset");
     if (!id) return render(req, reply, "Link expired", authCard("This link has expired", "It was used already, or is too old.", html`<a class="btn primary" href="/forgot">Ask for a new one</a>`), null, 400);
     const email = (await d.db.query<{ email: string }>("SELECT email FROM users WHERE id = $1", [id])).rows[0].email;
@@ -393,6 +439,15 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
 
   // ------------------------------------------------------------------ account and security
 
+  /** The recovery codes, shown once. */
+  const codesPage = (req: FastifyRequest, reply: FastifyReply, codes: string[], title: string) =>
+    render(req, reply, title, html`${pageHead({ title, sub: "If you lose your phone, each of these signs you in once instead of a code from the app." })}
+      <div style="max-width:640px">${panel({}, html`
+        <div class="callout warn">${icon("key")}<div><b>Store them now: they are shown only this once.</b><p>Keep them somewhere safe and apart from your phone, such as a password manager. Any earlier codes no longer work.</p></div></div>
+        <ol class="codes">${codes.map((c) => html`<li><code>${c}</code></li>`)}</ol>
+        <div class="row"><button type="button" data-copy="${codes.join("\n")}">${icon("copy", 16)} Copy all</button></div>`,
+        html`<a class="btn primary" href="/account">I have stored them</a>`)}</div>`);
+
   app.get("/account", async (req, reply) => {
     const s = signedIn(req, reply);
     if (!s) return reply;
@@ -400,11 +455,19 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const sessions = (await d.db.query<{ id: number; ip: string | null; user_agent: string | null; created_at: Date; last_seen_at: Date; current: boolean }>(
       "SELECT id, ip, user_agent, created_at, last_seen_at, token_hash = $2 AS current FROM sessions WHERE user_id = $1 AND expires_at > now() AND NOT needs_totp ORDER BY current DESC, last_seen_at DESC",
       [s.user.id, s.tokenHash])).rows;
+    const codesLeft = s.user.totp ? Number((await d.db.query("SELECT count(*) AS n FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL", [s.user.id])).rows[0].n) : 0;
+    const pendingEmail = (await d.db.query<{ new_email: string }>("SELECT new_email FROM email_tokens WHERE user_id = $1 AND kind = 'email_change' AND used_at IS NULL AND expires_at > now() ORDER BY expires_at DESC LIMIT 1", [s.user.id])).rows[0]?.new_email;
+    const fs = takeForm(req, reply);
+    const sudo = (hash: string) => `/sudo?next=${encodeURIComponent(`/account${hash}`)}`;
+    const staff = isStaff(s.user);
+    const superadmin = s.user.role === "superadmin";
     let totp: Html;
     if (s.user.totp) {
       totp = html`<div class="switch-row"><div>${badge("ok", "On")} <span class="dim">Signing in asks for a code from your authenticator app.</span></div></div>
-        <form method="post" action="/account/totp/disable" style="margin-top:16px">${csrfField(s.csrf)}
-          ${field({ id: "off", label: "Current code, to turn it off", help: isStaff(s.user) ? "Admins need two-step sign-in: without it the admin console is closed to you." : "", control: html`<input id="off" class="w-sm" name="code" inputmode="numeric" required maxlength="7">` })}
+        <div class="callout${codesLeft <= 2 ? " warn" : ""}" style="margin:16px 0 0">${icon("key")}<div><b>Recovery codes: ${codesLeft} left</b><p>${codesLeft ? "Each signs you in once if you lose your phone." : "You have none: make a set now, in case you lose your phone."}</p></div>
+          <form method="post" action="/account/recovery-codes" style="margin-left:auto"${codesLeft ? html` data-confirm="Your ${codesLeft} unused recovery code${codesLeft === 1 ? "" : "s"} will stop working." data-confirm-title="Make new recovery codes?" data-confirm-ok="Make new codes"` : ""}>${csrfField(s.csrf)}<button class="sm">${codesLeft ? "Make new codes" : "Make recovery codes"}</button></form></div>
+        <form method="post" action="/account/totp/disable" style="margin-top:20px" data-confirm="${staff ? "Without it the admin console closes to you. " : ""}Signing in will need only your password." data-confirm-title="Turn off two-step sign-in?" data-danger>${csrfField(s.csrf)}
+          ${field({ id: "off", label: "Current code (or a recovery code), to turn it off", error: fs.for("totp-off").e("code"), help: staff ? "Admins need two-step sign-in: without it the admin console is closed to you." : "", control: codeInput("off", 'class="w-sm"') })}
           <div class="row"><button class="danger">Turn off two-step sign-in</button></div></form>`;
     } else if (s.pendingTotpEnc) {
       const secret = decrypt(d.config.sessionSecret, s.pendingTotpEnc);
@@ -412,29 +475,40 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       totp = html`<ol style="padding-left:18px;margin:0 0 16px"><li>Scan this QR code with an authenticator app (1Password, Google Authenticator, Authy…), or type the key.</li><li>Enter the 6-digit code it shows.</li></ol>
         <div class="row tight" style="align-items:flex-start;gap:24px"><img src="${qr}" alt="QR code for the authenticator app" width="168" height="168" style="border-radius:8px;border:1px solid var(--line);background:#fff">
         <div style="flex:1;min-width:220px"><p class="dim small">Key: <code>${secret}</code></p>
-        <form method="post" action="/account/totp/confirm">${csrfField(s.csrf)}${field({ id: "code", label: "Code", control: html`<input id="code" class="w-sm" name="code" inputmode="numeric" required maxlength="7" autocomplete="one-time-code">` })}
-        <div class="row"><button class="primary">Turn on</button></div></form></div></div>`;
+        <form method="post" action="/account/totp/confirm">${csrfField(s.csrf)}${field({ id: "code", label: "Code", error: fs.for("totp-on").e("code"), control: html`<input id="code" class="w-sm" name="code" inputmode="numeric" required maxlength="7" autocomplete="one-time-code">` })}
+        <div class="row"><button class="primary">Turn on</button><button class="ghost" formaction="/account/totp/cancel" formnovalidate>Cancel</button></div></form></div></div>`;
     } else {
       totp = html`<div class="switch-row"><div>${badge("neutral", "Off")} <span class="dim">Add a code from an authenticator app to your password.</span></div>
         <form method="post" action="/account/totp/start">${csrfField(s.csrf)}<button class="primary">Set up two-step sign-in</button></form></div>`;
     }
+    const pw = fs.for("password");
     return render(req, reply, "Account & security", html`${pageHead({ title: "Account & security", sub: "Your sign-in, two-step sign-in and the devices signed in to this account." })}
-      ${isStaff(s.user) && !s.user.totp ? html`<div class="callout warn">${icon("alert")}<div><b>Two-step sign-in is required for admins</b><p>Set it up below. Until then the admin console stays closed.</p></div></div>` : ""}
-      ${panel({ title: "Profile" }, facts([
-        ["Email", html`${s.user.email} ${s.user.verified ? badge("ok", "Confirmed") : html`${badge("warn", "Not confirmed")} <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button class="sm">Resend link</button></form>`}`],
+      ${staff && !s.user.totp ? html`<div class="callout warn">${icon("alert")}<div><b>Two-step sign-in is required for admins</b><p>Set it up below. Until then the admin console stays closed.</p></div></div>` : ""}
+      ${panel({ title: "Profile", actions: s.elevated ? opener("change-email", "Change email", "sm") : html`<a class="btn sm" href="${sudo("#change-email")}">Change email</a>` }, facts([
+        ["Email", html`${s.user.email} ${s.user.verified ? badge("ok", "Confirmed") : html`${badge("warn", "Not confirmed")} <form class="inline" method="post" action="/verify/resend">${csrfField(s.csrf)}<button class="sm">Resend link</button></form>`}
+          ${pendingEmail ? html`<span class="sub dim small">Changing to ${pendingEmail}: open the link sent there.</span>` : ""}`],
         ["Role", s.user.role === "superadmin" ? "Super admin" : s.user.role === "admin" ? "Admin" : "Station owner"],
         ["Member since", day(me.created_at)],
         ["Last sign-in", me.last_login_at ? `${when(me.last_login_at)}${me.last_login_ip ? ` from ${me.last_login_ip}` : ""}` : "—"],
       ]))}
       ${panel({ title: "Two-step sign-in", sub: "A second step at sign-in and before sensitive changes." }, totp)}
-      ${panel({ title: "Password", sub: "Changing it signs out every other device." }, html`<form method="post" action="/account/password">${csrfField(s.csrf)}<div class="form-grid">
-        ${field({ id: "cur", label: "Current password", control: html`<input id="cur" type="password" name="current" required autocomplete="current-password" maxlength="${MAX_PASSWORD}">` })}
-        ${field({ id: "new", label: "New password", help: `${MIN_PASSWORD} characters or more.`, control: html`<input id="new" type="password" name="password" required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password">` })}</div>
+      ${panel({ title: "Password", sub: "Changing it signs out every other device." }, html`<form method="post" action="/account/password">${csrfField(s.csrf)}
+        ${field({ id: "cur", label: "Current password", error: pw.e("current"), control: passwordInput("cur", "current", `required autocomplete="current-password" maxlength="${MAX_PASSWORD}"`) })}
+        <div class="form-grid">
+        ${field({ id: "new", label: "New password", error: pw.e("password"), help: `${MIN_PASSWORD} characters or more.`, control: passwordInput("new", "password", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}
+        ${field({ id: "new2", label: "New password again", error: pw.e("password2"), control: passwordInput("new2", "password2", `required minlength="${MIN_PASSWORD}" maxlength="${MAX_PASSWORD}" autocomplete="new-password"`) })}</div>
         <div class="row"><button class="primary">Change password</button></div></form>`)}
-      ${panel({ title: "Signed-in devices", sub: "End any you do not recognise.", flush: true, actions: sessions.length > 1 ? html`<form method="post" action="/account/sessions/others">${csrfField(s.csrf)}<button class="sm danger">Sign out all others</button></form>` : "" },
-        html`<div class="table-wrap"><table><tr><th>Device</th><th>IP address</th><th>Signed in</th><th>Last active</th><th class="actions"></th></tr>${sessions.map((x) => html`<tr>
+      ${panel({ title: "Signed-in devices", sub: "End any you do not recognise.", flush: true, actions: sessions.length > 1 ? html`<form method="post" action="/account/sessions/others" data-confirm="Every device but this one is signed out and must sign in again." data-confirm-title="Sign out all other devices?" data-danger>${csrfField(s.csrf)}<button class="sm danger">Sign out all others</button></form>` : "" },
+        table(["Device", "IP address", "Signed in", "Last active", { text: "", cls: "actions" }], sessions.map((x) => html`<tr>
           <td><b>${deviceOf(x.user_agent)}</b>${x.current ? html` ${badge("accent", "This device")}` : ""}</td><td>${x.ip ?? "—"}</td><td>${when(x.created_at)}</td><td>${when(x.last_seen_at)}</td>
-          <td class="actions">${x.current ? "" : html`<form method="post" action="/account/sessions/${x.id}/end">${csrfField(s.csrf)}<button class="sm">Sign out</button></form>`}</td></tr>`)}</table></div>`)}`, takeFlash(req, reply));
+          <td class="actions">${x.current ? "" : html`<form method="post" action="/account/sessions/${x.id}/end" data-confirm="${deviceOf(x.user_agent)}${x.ip ? ` (${x.ip})` : ""} is signed out and must sign in again." data-confirm-title="Sign out this device?">${csrfField(s.csrf)}<button class="sm">Sign out</button></form>`}</td></tr>`)))}
+      ${panel({ title: "Delete account", tone: "danger", sub: superadmin ? "You are the super admin: hand the role to another admin first (People > their page)." : "Deletes your account and every station it has. Their names are held for 30 days." },
+        superadmin ? html`<button class="danger" disabled>Delete my account</button>` : s.elevated ? opener("delete-account", "Delete my account…", "danger") : html`<a class="btn danger" href="${sudo("#delete-account")}">Delete my account…</a>`)}
+      ${s.elevated ? modal({ id: "change-email", title: "Change your email", action: "/account/email", csrf: s.csrf, submit: "Send the link", open: fs.for("email").returned,
+        text: html`<p>We send a link to the new address; the change happens when you open it. Until then you keep signing in with ${s.user.email}.</p>`,
+        body: field({ id: "new-email", label: "New email", error: fs.for("email").e("email"), control: html`<input id="new-email" name="email" type="email" required autocomplete="email" maxlength="254" value="${fs.for("email").v("email")}">` }) }) : ""}
+      ${s.elevated && !superadmin ? modal({ id: "delete-account", title: "Delete your account", tone: "danger", action: "/account/delete", csrf: s.csrf, submit: "Delete my account", typed: s.user.email,
+        text: html`<p>Your account, your stations and their access codes are deleted at once and cannot be brought back. Payments already made are not refunded.</p>` }) : ""}`, takeFlash(req, reply));
   });
   app.post("/account/totp/start", async (req, reply) => {
     const s = signedIn(req, reply);
@@ -442,23 +516,40 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     await d.db.query("UPDATE sessions SET pending_totp_enc = $2 WHERE token_hash = $1", [s.tokenHash, encrypt(d.config.sessionSecret, newTotpSecret())]);
     return reply.redirect("/account");
   });
+  app.post("/account/totp/cancel", async (req, reply) => {
+    const s = signedIn(req, reply);
+    if (!s) return reply;
+    await d.db.query("UPDATE sessions SET pending_totp_enc = NULL WHERE token_hash = $1", [s.tokenHash]);
+    return back(reply, "/account", { kind: "ok", text: "Two-step sign-in was not turned on." });
+  });
   app.post("/account/totp/confirm", async (req, reply) => {
     const s = signedIn(req, reply);
     if (!s?.pendingTotpEnc) return reply.redirect("/account");
-    if (!verifyTotp(decrypt(d.config.sessionSecret, s.pendingTotpEnc), form(req).code)) return back(reply, "/account", { kind: "bad", text: "That code is not right; try the newest one." });
+    if (!verifyTotp(decrypt(d.config.sessionSecret, s.pendingTotpEnc), form(req).code)) return back(reply, "/account", { kind: "bad", text: "That code is not right; try the newest one." }, { form: "totp-on", values: {}, errors: { code: "That code is not right; try the newest one." } });
     await d.db.query("UPDATE users SET totp_secret_enc = $2 WHERE id = $1", [s.user.id, s.pendingTotpEnc]);
     await d.db.query("UPDATE sessions SET pending_totp_enc = NULL WHERE token_hash = $1", [s.tokenHash]);
     await audit(d.db, { actor: s.user.id, action: "user.totp_on", ip: req.ip });
     void notify(s.user.email, "Two-step sign-in is on", "Two-step sign-in was turned on for your account.");
-    return back(reply, "/account", { kind: "ok", text: "Two-step sign-in is on." });
+    return codesPage(req, reply, await makeRecoveryCodes(s.user.id), "Two-step sign-in is on: your recovery codes");
+  });
+  app.post("/account/recovery-codes", async (req, reply) => {
+    const s = signedIn(req, reply);
+    if (!s) return reply;
+    if (!s.user.totp) return back(reply, "/account", { kind: "bad", text: "Turn on two-step sign-in first." });
+    if (!requireSudo(req, reply, s, "/account")) return reply;
+    await audit(d.db, { actor: s.user.id, action: "user.recovery_codes", ip: req.ip });
+    void notify(s.user.email, "New recovery codes", "A new set of two-step recovery codes was made for your account; the earlier ones no longer work.");
+    return codesPage(req, reply, await makeRecoveryCodes(s.user.id), "Your new recovery codes");
   });
   app.post("/account/totp/disable", async (req, reply) => {
     const s = signedIn(req, reply);
     if (!s) return reply;
-    if (!(await hit(d.db, `totp:${s.user.id}`, LIMITS.totp)).ok) return back(reply, "/account", { kind: "bad", text: "Too many tries; wait 10 minutes." });
+    const wrong = (text: string) => back(reply, "/account", { kind: "bad", text }, { form: "totp-off", values: {}, errors: { code: text } });
+    if (!(await hit(d.db, `totp:${s.user.id}`, LIMITS.totp)).ok) return wrong("Too many tries; wait 10 minutes.");
     const enc = (await d.db.query("SELECT totp_secret_enc FROM users WHERE id = $1", [s.user.id])).rows[0]?.totp_secret_enc;
-    if (!enc || !verifyTotp(decrypt(d.config.sessionSecret, enc), form(req).code)) return back(reply, "/account", { kind: "bad", text: "That code is not right." });
+    if (!enc || !(await secondFactor(s.user.id, enc, form(req).code))) return wrong("That code is not right.");
     await d.db.query("UPDATE users SET totp_secret_enc = NULL WHERE id = $1", [s.user.id]);
+    await d.db.query("DELETE FROM recovery_codes WHERE user_id = $1", [s.user.id]);
     await audit(d.db, { actor: s.user.id, action: "user.totp_off", ip: req.ip });
     void notify(s.user.email, "Two-step sign-in was turned off", `Two-step sign-in was turned off for your account, from ${req.ip}.`);
     return back(reply, "/account", { kind: "ok", text: "Two-step sign-in is off." });
@@ -467,16 +558,68 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const s = signedIn(req, reply);
     if (!s) return reply;
     const f = form(req);
-    if (!(await hit(d.db, `sudo:${s.user.id}`, LIMITS.login)).ok) return back(reply, "/account", { kind: "bad", text: "Too many tries; wait 10 minutes." });
+    const wrong = (field: string, text: string) => back(reply, "/account", { kind: "bad", text }, { form: "password", values: {}, errors: { [field]: text } });
+    if (!(await hit(d.db, `sudo:${s.user.id}`, LIMITS.login)).ok) return wrong("current", "Too many tries; wait 10 minutes.");
     const hash = (await d.db.query("SELECT password_hash FROM users WHERE id = $1", [s.user.id])).rows[0].password_hash;
-    if (!(await verifySecret(hash, String(f.current ?? "").slice(0, MAX_PASSWORD)))) return back(reply, "/account", { kind: "bad", text: "The current password is wrong." });
+    if (!(await verifySecret(hash, String(f.current ?? "").slice(0, MAX_PASSWORD)))) return wrong("current", "The current password is wrong.");
     const weak = passwordProblem(String(f.password ?? ""), s.user.email);
-    if (weak) return back(reply, "/account", { kind: "bad", text: weak });
+    if (weak) return wrong("password", weak);
+    if (f.password2 !== undefined && f.password2 !== f.password) return wrong("password2", "The two new passwords are not the same.");
     await d.db.query("UPDATE users SET password_hash = $2 WHERE id = $1", [s.user.id, await hashSecret(f.password)]);
     await d.db.query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2", [s.user.id, s.tokenHash]);
     await audit(d.db, { actor: s.user.id, action: "user.password_change", ip: req.ip });
     void notify(s.user.email, "Your password was changed", `The password of your ${d.config.rootDomain} account was changed from ${req.ip}. Other devices were signed out.`);
     return back(reply, "/account", { kind: "ok", text: "Password changed; other devices were signed out." });
+  });
+  app.post("/account/email", async (req, reply) => {
+    const s = signedIn(req, reply);
+    if (!s) return reply;
+    if (!requireSudo(req, reply, s, "/account#change-email")) return reply;
+    const f = form(req);
+    const email = String(f.email ?? "").trim().toLowerCase();
+    const wrong = (text: string) => back(reply, "/account", { kind: "bad", text }, { form: "email", values: f, errors: { email: text } });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return wrong("That is not an email address.");
+    if (email === s.user.email.toLowerCase()) return wrong("That is already your email.");
+    if ((await d.db.query("SELECT 1 FROM users WHERE lower(email) = $1", [email])).rowCount) return wrong("Another account uses that email.");
+    if (!(await hit(d.db, `mail:${email}`, LIMITS.mail)).ok) return wrong("Too many emails to that address in the last hour; try later.");
+    const token = newToken();
+    await d.db.query("UPDATE email_tokens SET used_at = now() WHERE user_id = $1 AND kind = 'email_change' AND used_at IS NULL", [s.user.id]);
+    await d.db.query("INSERT INTO email_tokens (token_hash, user_id, kind, new_email, expires_at) VALUES ($1, $2, 'email_change', $3, now() + interval '24 hours')", [tokenHash(token), s.user.id, email]);
+    const sent = await d.mail({ to: email, subject: `Confirm your new email for ${d.config.rootDomain}`,
+      text: `Open this link within 24 hours to make ${email} the email of your ${d.config.rootDomain} account:\n\n${d.config.dashboardUrl}/verify-email?token=${token}\n\nIf you did not ask for this, ignore this email.\n` }).then(() => true, () => false);
+    if (!sent) return wrong("The email could not be sent; try again later.");
+    await audit(d.db, { actor: s.user.id, action: "user.email_change_asked", target: email, ip: req.ip });
+    void notify(s.user.email, "A change of your email address was asked", `Someone signed in to your account asked to change its email to ${email}, from ${req.ip}. Nothing changes unless the link sent there is opened.`);
+    return back(reply, "/account", { kind: "ok", text: `A link is on its way to ${email}. Your email changes when you open it.` });
+  });
+  app.get("/verify-email", async (req, reply) => {
+    const r = await d.db.query<{ user_id: number; new_email: string }>(
+      "UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND kind = 'email_change' AND used_at IS NULL AND expires_at > now() RETURNING user_id, new_email",
+      [tokenHash(String((req.query as Form).token ?? ""))]);
+    const t = r.rows[0];
+    if (!t) return render(req, reply, "Link expired", authCard("This link has expired", "It was used already, or is too old. Ask for the change again on Account & security.", html`<a class="btn primary" href="/account">Account &amp; security</a>`), null, 400);
+    const old = (await d.db.query<{ email: string }>("SELECT email FROM users WHERE id = $1", [t.user_id])).rows[0]?.email;
+    try {
+      await d.db.query("UPDATE users SET email = $2, email_verified_at = now() WHERE id = $1", [t.user_id, t.new_email]);
+    } catch (e) {
+      if ((e as { code?: string }).code === "23505") return render(req, reply, "Email in use", authCard("That email is taken", "Another account started using it in the meantime.", html`<a class="btn primary" href="/account">Account &amp; security</a>`), null, 409);
+      throw e;
+    }
+    await audit(d.db, { actor: t.user_id, action: "user.email", target: t.new_email, ip: req.ip, metadata: { from: old } });
+    if (old) void notify(old, "Your email address was changed", `The email of your ${d.config.rootDomain} account is now ${t.new_email}. Sign in with it from now on.`);
+    return back(reply, req.session ? "/account" : "/login", { kind: "ok", text: `Your email is now ${t.new_email}.` });
+  });
+  app.post("/account/delete", async (req, reply) => {
+    const s = signedIn(req, reply);
+    if (!s) return reply;
+    if (!requireSudo(req, reply, s, "/account#delete-account")) return reply;
+    if (s.user.role === "superadmin") return back(reply, "/account", { kind: "bad", text: "Hand the super admin role to another admin first." });
+    if (String(form(req).confirm ?? "").trim().toLowerCase() !== s.user.email.toLowerCase()) return back(reply, "/account#delete-account", { kind: "bad", text: "Type your email exactly to delete your account." });
+    const email = s.user.email;
+    await subs.removeUser(ctx(), { id: s.user.id, ip: req.ip }, s.user.id);
+    await endSession(d.db, reply, req.session, secure);
+    void d.mail({ to: email, subject: `[${d.config.rootDomain}] Your account was deleted`, text: `Your ${d.config.rootDomain} account and its stations were deleted, from ${req.ip}, as you asked.\n` }).catch(() => undefined);
+    return back(reply, "/login", { kind: "ok", text: "Your account and its stations are deleted." });
   });
   app.post("/account/sessions/:id/end", async (req, reply) => {
     const s = signedIn(req, reply);
@@ -529,19 +672,20 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     return render(req, reply, "Stations", html`${pageHead({ title: "Stations", sub: html`${limitText} ${rows.length} in use.${a.expiresAt ? ` Paid until ${day(a.expiresAt)}.` : ""}`, actions: html`${claim}${!room && billing ? html`<a class="btn" href="/billing">Upgrade plan</a>` : ""}` })}
       ${!s.user.verified ? html`<div class="callout warn">${icon("alert")}<div><b>Confirm your email to claim a station</b><p>We sent a link to ${s.user.email}.</p></div><form method="post" action="/verify/resend" style="margin-left:auto">${csrfField(s.csrf)}<button class="sm">Send the link again</button></form></div>` : ""}
       ${a.lapsed ? html`<div class="callout info">${icon("info")}<div><b>Your ${a.lapsed} plan has ended</b><p>You are on the default plan again. ${billing ? html`<a href="/billing">Renew it</a> to get its limit back.` : ""}</p></div></div>` : ""}
-      ${rows.length ? panel({ flush: true }, html`<div class="table-wrap"><table><tr><th>Address</th><th>Status</th><th class="wide-only">Last seen</th><th class="wide-only">Nova</th><th class="actions"></th></tr>${rows.map((r) => html`<tr>
+      ${rows.length ? panel({ flush: true }, table(["Address", "Status", { text: "Last seen", cls: "wide-only" }, { text: "Nova", cls: "wide-only" }, { text: "", cls: "actions" }], rows.map((r) => html`<tr>
           <td><a href="/stations/${r.id}"><b>${fqdnOf(r.label, d.config.rootDomain)}</b></a></td>
-          <td>${statusChip(r.status, r.last_seen_at)}</td><td class="wide-only">${when(r.last_seen_at)}</td><td class="wide-only">${r.app_version ?? "—"}</td><td class="actions"><a class="btn sm" href="/stations/${r.id}">Manage</a></td></tr>`)}</table></div>`)
+          <td>${statusChip(r.status, r.last_seen_at)}</td><td class="wide-only">${when(r.last_seen_at)}</td><td class="wide-only">${r.app_version ?? "—"}</td><td class="actions"><a class="btn sm" href="/stations/${r.id}">Manage</a></td></tr>`)))
         : panel({}, emptyState("No station yet", html`Claim an address like <b>kfm.${d.config.rootDomain}</b>, then enter its access code in Nova.`, claim))}`, takeFlash(req, reply));
   });
 
   app.get("/stations/new", async (req, reply) => {
     const s = signedIn(req, reply);
     if (!s) return reply;
+    const fs = takeForm(req, reply).for("claim");
     return render(req, reply, "Claim an address", html`${pageHead({ title: "Claim a station address", back: { href: "/", text: "Stations" }, sub: "Presenters use this address to reach your studio." })}
       <div style="max-width:640px">${panel({}, html`<form method="post" action="/stations">${csrfField(s.csrf)}
-        ${field({ id: "label", label: "Name", help: "3–63 lowercase letters, digits and hyphens; not starting or ending with a hyphen.",
-          control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" spellcheck="false" placeholder="kfm" maxlength="63"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` })}
+        ${field({ id: "label", label: "Name", error: fs.e("label"), help: "3–63 lowercase letters, digits and hyphens; not starting or ending with a hyphen.",
+          control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" spellcheck="false" placeholder="kfm" maxlength="63" value="${fs.v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` })}
         <div class="row"><button class="primary">Claim address</button><a class="btn ghost" href="/">Cancel</a></div></form>`)}</div>`, takeFlash(req, reply));
   });
   app.post("/stations", async (req, reply) => {
@@ -552,7 +696,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       const { accessCode } = await subs.claim(ctx(), { id: s.user.id, ip: req.ip }, label);
       return codeOnce(req, reply, label, accessCode, "Your station's address is yours");
     } catch (e) {
-      if (e instanceof subs.SubdomainError) return back(reply, "/stations/new", { kind: "bad", text: e.message });
+      if (e instanceof subs.SubdomainError) return back(reply, "/stations/new", { kind: "bad", text: e.message }, { form: "claim", values: form(req), errors: { label: e.message } });
       throw e;
     }
   });
@@ -586,6 +730,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const manage = can(s.user, "stations.manage");
     const fromAdmin = !mine && can(s.user, "stations.view");
     const blocked = st.status === "suspended" && !manage;
+    const fs = takeForm(req, reply);
     const certText = !cert ? html`<span class="dim">None yet. Nova asks for one when it starts its server.</span>` : cert.status === "issued" ? html`${badge("ok", "Issued")} <span class="dim">until ${day(cert.expires_at)}</span>` : cert.status === "pending" ? badge("info", "Being issued") : html`${badge("bad", "Failed")} <span class="dim">${cert.error ?? ""}</span>`;
     return render(req, reply, st.label, html`${pageHead({ title: fqdn, back: fromAdmin ? { href: "/admin/stations", text: "All stations" } : { href: "/", text: "Stations" },
         meta: html`${statusChip(st.status, st.last_seen_at)}${fromAdmin ? html`<span>Owner: ${can(s.user, "users.view") ? html`<a href="/admin/users/${st.user_id}">${st.owner}</a>` : st.owner}</span>` : ""}` })}
@@ -604,19 +749,19 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       ${blocked ? "" : html`
       ${panel({ title: "Rename", sub: "The old name is held for 30 days. Nova picks up the new name within 5 minutes and gets a new certificate." }, html`
         <form method="post" action="/stations/${st.id}/rename" data-confirm="Rename ${st.label}? Presenters will need the new address.">${csrfField(s.csrf)}
-          ${field({ id: "label", label: "New name", control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" maxlength="63" spellcheck="false"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` })}
+          ${field({ id: "label", label: "New name", error: fs.for("rename").e("label"), control: html`<div class="input-group"><input id="label" name="label" required autocomplete="off" maxlength="63" spellcheck="false" value="${fs.for("rename").v("label")}"><span class="addon">.${d.config.rootDomain}</span></div><div id="name-state" aria-live="polite"></div>` })}
           <div class="row"><button>Rename station</button></div></form>`)}
       ${panel({ title: "Access code", sub: "Make a new code if the old one may have leaked. The old code, and every Nova signed in with it, stop working at once." },
         html`<form method="post" action="/stations/${st.id}/regenerate" data-confirm="Make a new access code? Nova will need it entered again.">${csrfField(s.csrf)}<button>${icon("key", 16)} Make a new access code</button></form>`)}`}
-      ${panel({ title: "Delete station", tone: "danger", sub: "Removes the address, its certificate and every sign-in. The name is held for 30 days." }, html`
-        <form method="post" action="/stations/${st.id}/delete">${csrfField(s.csrf)}${field({ id: "confirm", label: `Type ${st.label} to confirm`, control: html`<input id="confirm" class="w-md" name="confirm" required autocomplete="off">` })}
-        <div class="row"><button class="danger-solid">Delete this station</button></div></form>`)}
+      ${panel({ title: "Delete station", tone: "danger", sub: "Removes the address, its certificate and every sign-in. The name is held for 30 days." }, opener("delete-station", "Delete this station…", "danger"))}
+      ${modal({ id: "delete-station", title: `Delete ${fqdn}`, tone: "danger", action: `/stations/${st.id}/delete`, csrf: s.csrf, submit: "Delete station", typed: st.label,
+        text: html`<p>The address stops working at once, Nova is signed out, and the certificate is revoked. The name is held for 30 days, then anyone may claim it.</p>` })}
       </div><div>
       ${manage ? panel({ title: "Administration", sub: "Visible to admins only." }, html`
         <form method="post" action="/admin/stations/${st.id}/${st.status === "active" ? "suspend" : "unsuspend"}" data-confirm="${st.status === "active" ? "Suspend" : "Restore"} ${st.label}?">${csrfField(s.csrf)}<input type="hidden" name="back" value="/stations/${st.id}">
           <button class="${st.status === "active" ? "danger" : "primary"}" style="width:100%">${st.status === "active" ? "Suspend station" : "Restore station"}</button></form>
         <form method="post" action="/stations/${st.id}/transfer" data-confirm="Give ${st.label} to someone else? Its access code is replaced and Nova is signed out." style="margin-top:20px">${csrfField(s.csrf)}
-          ${field({ id: "to", label: "Move to another owner", help: "A new access code is made for the new owner (shown once) and the old one stops working.", control: html`<input id="to" name="email" type="email" required autocomplete="off" placeholder="owner@example.com">` })}
+          ${field({ id: "to", label: "Move to another owner", error: fs.for("transfer").e("email"), help: "A new access code is made for the new owner (shown once) and the old one stops working.", control: html`<input id="to" name="email" type="email" required autocomplete="off" placeholder="owner@example.com">` })}
           <div class="row"><button>Move station</button></div></form>`) : ""}
       </div></div>`, takeFlash(req, reply));
   });
@@ -630,7 +775,7 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
       try {
         return await run(s, st.id, form(req), req, reply);
       } catch (e) {
-        if (e instanceof subs.SubdomainError) return back(reply, `/stations/${st.id}`, { kind: "bad", text: e.message });
+        if (e instanceof subs.SubdomainError) return back(reply, `/stations/${st.id}`, { kind: "bad", text: e.message }, { form: name, values: form(req), errors: { label: e.message, email: e.message } });
         throw e;
       }
     });
@@ -672,7 +817,10 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
     const me = (await d.db.query<{ plan_id: number | null; plan_expires_at: Date | null }>("SELECT plan_id, plan_expires_at FROM users WHERE id = $1", [s.user.id])).rows[0];
     const used = Number((await d.db.query("SELECT count(*) AS n FROM subdomains WHERE user_id = $1", [s.user.id])).rows[0].n);
     const plans = await plansForSale(d.db);
-    const history = (await d.db.query("SELECT reference, plan_name, amount_minor, currency, status, created_at, paid_at, period_end FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50", [s.user.id])).rows;
+    const query = req.query as Form;
+    const pg = pageOf(query, 25);
+    const { rows: history, total } = await paged<{ reference: string; plan_name: string; amount_minor: string; currency: string; status: string; created_at: Date; paid_at: Date | null; period_end: Date | null }>(d.db,
+      "SELECT reference, plan_name, amount_minor, currency, status, created_at, paid_at, period_end FROM payments WHERE user_id = $1 ORDER BY created_at DESC", [s.user.id], pg);
     const cancelled = (req.query as Form).cancelled;
     const active = (id: number) => me.plan_id === id && (!me.plan_expires_at || me.plan_expires_at > new Date());
     return render(req, reply, "Billing", html`${pageHead({ title: "Billing", sub: html`Payments are handled securely by ${PROVIDER_INFO[b.provider].name}. Card details never reach this platform.` })}
@@ -691,9 +839,31 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
           <ul><li>${icon("check", 15)} ${stationWord(p.station_limit)}</li><li>${icon("shield", 15)} Certificates and DNS included</li></ul>
           ${s.user.verified ? html`<form method="post" action="/billing/checkout">${csrfField(s.csrf)}<input type="hidden" name="plan" value="${p.id}"><button class="${active(p.id) ? "" : "primary"}">${active(p.id) ? "Renew" : "Choose"} ${p.name}</button></form>` : html`<p class="dim small">Confirm your email to buy a plan.</p>`}
         </div>`)}</div>` : emptyState("No plans for sale", "Check back later."))}
-      ${panel({ title: "Payment history", flush: true }, history.length ? html`<div class="table-wrap"><table><tr><th>Date</th><th>Plan</th><th class="num">Amount</th><th>Status</th><th>Covers until</th><th>Reference</th></tr>${history.map((h) => html`<tr>
-        <td>${when(h.created_at)}</td><td>${h.plan_name}</td><td class="num">${formatMoney(Number(h.amount_minor), h.currency)}</td><td>${paymentBadge(h.status)}</td><td>${day(h.period_end)}</td><td><code>${h.reference}</code></td></tr>`)}</table></div>`
+      ${panel({ title: "Payment history", flush: true, id: "history" }, history.length ? html`${table(["Date", "Plan", { text: "Amount", cls: "num" }, "Status", "Covers until", { text: "", cls: "actions" }], history.map((h) => html`<tr>
+        <td>${when(h.created_at)}</td><td>${h.plan_name}</td><td class="num">${formatMoney(Number(h.amount_minor), h.currency)}</td><td>${paymentBadge(h.status)}</td><td>${day(h.period_end)}</td><td class="actions"><a class="btn sm" href="/billing/payments/${encodeURIComponent(h.reference)}">${h.status === "paid" ? "Receipt" : "Details"}</a></td></tr>`))}
+        ${pager("/billing", query, pg, total, "payments")}`
         : html`<div class="card-body"><p class="dim" style="margin:0">No payments yet.</p></div>`)}`, takeFlash(req, reply));
+  });
+
+  app.get("/billing/payments/:ref", async (req, reply) => {
+    const s = signedIn(req, reply);
+    if (!s) return reply;
+    const p = (await d.db.query<{ reference: string; plan_name: string; period: string; amount_minor: string; currency: string; status: string; provider: string; live: boolean; created_at: Date; paid_at: Date | null; period_end: Date | null; email: string }>(
+      "SELECT reference, plan_name, period, amount_minor, currency, status, provider, live, created_at, paid_at, period_end, email FROM payments WHERE reference = $1 AND user_id = $2",
+      [String((req.params as { ref: string }).ref), s.user.id])).rows[0];
+    if (!p) return render(req, reply, "Not found", html`${pageHead({ title: "No such payment", back: { href: "/billing#history", text: "Billing" } })}`, null, 404);
+    return render(req, reply, p.status === "paid" ? "Receipt" : "Payment", html`${pageHead({ title: p.status === "paid" ? "Receipt" : "Payment", back: { href: "/billing#history", text: "Billing" },
+        meta: html`${paymentBadge(p.status)}${p.live ? "" : badge("warn", "Test payment")}`, actions: html`<button type="button" data-print>${icon("ext", 16)} Print</button>` })}
+      <div style="max-width:720px">${panel({}, facts([
+        ["Reference", html`<code>${p.reference}</code>`],
+        ["For", `${p.plan_name} plan, 1 ${p.period}`],
+        ["Amount", formatMoney(Number(p.amount_minor), p.currency)],
+        ["Billed to", p.email],
+        ["Paid with", PROVIDER_INFO[p.provider as keyof typeof PROVIDER_INFO]?.name ?? p.provider],
+        ["Started", when(p.created_at)],
+        ["Paid", when(p.paid_at)],
+        ["Covers until", day(p.period_end)],
+      ]), html`<span class="dim small">${d.config.rootDomain}</span>`)}</div>`);
   });
 
   app.post("/billing/checkout", async (req, reply) => {

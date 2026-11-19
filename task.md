@@ -60,11 +60,11 @@ choice, and it can only be tested after saving.
 
 ## Phase 4 — Station-owner side
 
-- [ ] 20. **S** Claim / rename keep the typed name; station delete in a typed-confirm modal; confirmations before signing devices out.
-- [ ] 21. **L** Two-step recovery codes (10 single-use, shown once, regenerate, usable at sign-in and to confirm identity); "Cancel" for an unfinished two-step setup.
-- [ ] 22. **M** Change your own email (sudo; link to the new address; notice to the old one).
-- [ ] 23. **M** Delete your own account (sudo + typed confirm modal; the super admin must hand over the role first).
-- [ ] 24. **S** Billing history pagination + receipt page; confirm-password and show/hide on sign-up and reset.
+- [x] 20. **S** Claim / rename keep the typed name; station delete in a typed-confirm modal; confirmations before signing devices out.
+- [x] 21. **L** Two-step recovery codes (10 single-use, shown once, regenerate, usable at sign-in and to confirm identity); "Cancel" for an unfinished two-step setup.
+- [x] 22. **M** Change your own email (sudo; link to the new address; notice to the old one).
+- [x] 23. **M** Delete your own account (sudo + typed confirm modal; the super admin must hand over the role first).
+- [x] 24. **S** Billing history pagination + receipt page; confirm-password and show/hide on sign-up and reset.
 
 ---
 

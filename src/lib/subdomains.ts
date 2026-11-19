@@ -228,7 +228,9 @@ export async function removeUser(c: Ctx, actor: Actor, userId: number): Promise<
   return transaction(c.db, async (tx) => {
     const u = await tx.query<{ email: string }>("DELETE FROM users WHERE id = $1 RETURNING email", [userId]);
     if (!u.rows[0]) throw new SubdomainError("No such person.");
-    await audit(tx, { actor: actor.id, action: "user.delete", target: u.rows[0].email, ip: actor.ip, metadata: { stations: ids.length } });
+    // Someone deleting their own account is gone by now: the entry has no actor, and says so.
+    const self = actor.id === userId;
+    await audit(tx, { actor: self ? null : actor.id, action: "user.delete", target: u.rows[0].email, ip: actor.ip, metadata: { stations: ids.length, ...(self ? { self: true } : {}) } });
     return u.rows[0].email;
   });
 }

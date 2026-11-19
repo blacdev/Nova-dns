@@ -49,7 +49,7 @@ async function publicLookup(name: string): Promise<string[]> {
 /** The first part of audit actions ("user.login"): the Audit log's area filter. */
 const AUDIT_AREAS: Record<string, string> = { user: "People and sign-in", subdomain: "Stations", name: "Names", plan: "Plans", billing: "Payments", settings: "Settings", setup: "Setup checks", cert: "Certificates" };
 /** ops_events.kind. */
-const OPS_KINDS: Record<string, string> = { dns: "DNS", acme: "Certificates (ACME)", probe: "Reachability probes", job: "Background jobs" };
+const OPS_KINDS: Record<string, string> = { dns: "DNS", acme: "Certificates (ACME)", probe: "Reachability probes", mail: "Email", job: "Background jobs" };
 
 const mark = (ok: boolean | null) => (ok === true ? html`<span class="ok">✓</span>` : ok === false ? html`<span class="bad">✗</span>` : html`<span class="dim">?</span>`);
 
@@ -113,8 +113,8 @@ export function adminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     return h.render(req, reply, "Overview", html`${pageHead({ title: "Overview", sub: s.user.role === "superadmin" ? "You are the super admin: you may do everything, and decide what other admins may do." : "What is happening on the platform." })}
       ${todo.length ? html`<div class="callout warn">${icon("alert")}<div><b>Setup is not finished</b><p>${todo.join("; ")}.</p></div><a class="btn sm" href="/admin/settings" style="margin-left:auto">Open settings</a></div>` : ""}
       ${tiles.length ? html`<div class="stats">${tiles}</div>` : ""}
-      ${recent.length ? panel({ title: "Recent activity", flush: true, actions: html`<a class="btn sm" href="/admin/audit">Full audit log</a>` }, html`<div class="table-wrap"><table><tr><th>When</th><th>Who</th><th>Action</th><th>On</th></tr>${recent.map((r) => html`<tr>
-        <td>${when(r.created_at)}</td><td>${r.email ?? "—"}</td><td><code>${r.action}</code></td><td>${r.target ?? ""}</td></tr>`)}</table></div>`) : ""}`, h.takeFlash(req, reply));
+      ${recent.length ? panel({ title: "Recent activity", flush: true, actions: html`<a class="btn sm" href="/admin/audit">Full audit log</a>` }, table(["When", "Who", "Action", "On"], recent.map((r) => html`<tr>
+        <td>${when(r.created_at)}</td><td>${r.email ?? "—"}</td><td><code>${r.action}</code></td><td>${r.target ?? ""}</td></tr>`))) : ""}`, h.takeFlash(req, reply));
   });
 
   // ------------------------------------------------------------------ setup checks

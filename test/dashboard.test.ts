@@ -113,9 +113,21 @@ describe("an owner's way through", () => {
     const page = await b.get("/account");
     const secret = /Key: <code>([A-Z2-7]+)</.exec(page.body)![1];
     expect(page.body).toContain("data:image/png;base64");
-    await b.post("/account/totp/confirm", { code: totpAt(secret) }, { from: "/account" });
-    expect((await b.get("/account")).body).toContain("Two-step sign-in is on");
+    const shown = await b.post("/account/totp/confirm", { code: totpAt(secret) }, { from: "/account" });
+    expect(shown.body).toContain("Two-step sign-in is on: your recovery codes");
+    const codes = [...shown.body.matchAll(/<li><code>([a-z0-9]{5}-[a-z0-9]{5})<\/code><\/li>/g)].map((m) => m[1]);
+    expect(codes).toHaveLength(10);
+    expect((await b.get("/account")).body).toContain("Recovery codes: 10 left");
     await b.post("/logout", {}, { from: "/account" });
+
+    // A recovery code signs in once, in place of the app's code.
+    const lost = new Browser("198.51.100.3");
+    await lost.post("/login", { email: "owner@example.test", password: "correct horse battery" }, { from: "/login" });
+    expect((await lost.post("/login/totp", { code: codes[0].toUpperCase() }, { from: "/login/totp" })).headers.location).toBe("/account");
+    expect((await lost.get("/account")).body).toContain("Recovery codes: 9 left");
+    await lost.post("/logout", {}, { from: "/account" });
+    await lost.post("/login", { email: "owner@example.test", password: "correct horse battery" }, { from: "/login" });
+    expect((await lost.post("/login/totp", { code: codes[0] }, { from: "/login/totp" })).statusCode).toBe(401);
 
     const c = new Browser("198.51.100.2");
     const r = await c.post("/login", { email: "owner@example.test", password: "correct horse battery" }, { from: "/login" });
@@ -183,5 +195,68 @@ describe("admin", () => {
     // The audit log shows it all.
     const auditPage = (await boss.get("/admin/audit")).body;
     for (const a of ["subdomain.create", "subdomain.suspend", "subdomain.unsuspend", "name.blocked"]) expect(auditPage).toContain(a);
+  });
+});
+
+describe("an owner's own account", () => {
+  const me = new Browser("198.51.100.40");
+  const PW = "correct horse battery";
+  const sudo = () => me.post("/sudo", { password: PW, next: "/account" }, { from: "/sudo" });
+
+  it("sign-up asks for the password twice, and claim keeps the name typed", async () => {
+    const r = await me.post("/signup", { email: "self@example.test", password: PW, password2: "something else" });
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toContain("The two passwords are not the same.");
+    await me.post("/signup", { email: "self@example.test", password: PW, password2: PW });
+    await db.query("UPDATE users SET email_verified_at = now() WHERE email = 'self@example.test'");
+    await me.post("/stations", { label: "-bad-" }, { from: "/stations/new" });
+    const page = (await me.get("/stations/new")).body;
+    expect(page).toContain('value="-bad-"');
+    expect(page).toContain('class="field-error"');
+  });
+
+  it("cancels an unfinished two-step setup", async () => {
+    await me.post("/account/totp/start", {}, { from: "/account" });
+    expect((await me.get("/account")).body).toContain("Key: <code>");
+    await me.post("/account/totp/cancel", {}, { from: "/account" });
+    expect((await me.get("/account")).body).toContain("Set up two-step sign-in");
+  });
+
+  it("changes the email through a link sent to the new address", async () => {
+    // Sudo mode is needed (a fresh sign-in has it for a few minutes).
+    await db.query("UPDATE sessions s SET elevated_until = now() - interval '1 minute' FROM users u WHERE u.id = s.user_id AND u.email = 'self@example.test'");
+    expect((await me.post("/account/email", { email: "new-self@example.test" }, { from: "/account" })).headers.location).toMatch(/^\/sudo/);
+    await sudo();
+    await me.post("/account/email", { email: "owner@example.test" }, { from: "/account" });
+    expect((await me.get("/account")).body).toContain("Another account uses that email.");
+    await me.post("/account/email", { email: "new-self@example.test" }, { from: "/account" });
+    expect((await db.query("SELECT email FROM users WHERE email LIKE '%self@%'")).rows[0].email).toBe("self@example.test");
+    const link = linkIn(mails.filter((m) => m.to === "new-self@example.test").at(-1)!);
+    expect(mails.some((m) => m.to === "self@example.test" && m.subject.includes("change of your email"))).toBe(true);
+    await me.get(link.pathname + link.search);
+    expect((await db.query("SELECT email, email_verified_at IS NOT NULL AS ok FROM users WHERE email LIKE '%self@%'")).rows[0]).toEqual({ email: "new-self@example.test", ok: true });
+    // Used once.
+    expect((await me.get(link.pathname + link.search)).statusCode).toBe(400);
+  });
+
+  it("shows its own receipt, not anyone else's", async () => {
+    const id = (await db.query<{ id: number }>("SELECT id FROM users WHERE email = 'new-self@example.test'")).rows[0].id;
+    await db.query(`INSERT INTO payments (reference, user_id, email, plan_name, period, provider, live, amount_minor, currency, status, paid_at)
+      VALUES ('mine_1', $1, 'new-self@example.test', 'Pro', 'month', 'stripe', true, 1999, 'USD', 'paid', now()),
+             ('theirs_1', NULL, 'x@example.test', 'Pro', 'month', 'stripe', true, 1999, 'USD', 'paid', now())`, [id]);
+    const r = await me.get("/billing/payments/mine_1");
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain("$19.99");
+    expect((await me.get("/billing/payments/theirs_1")).statusCode).toBe(404);
+  });
+
+  it("deletes the account with its stations", async () => {
+    await sudo();
+    await me.post("/account/delete", { confirm: "wrong@example.test" }, { from: "/account" });
+    expect((await db.query("SELECT 1 FROM users WHERE email = 'new-self@example.test'")).rowCount).toBe(1);
+    const r = await me.post("/account/delete", { confirm: "NEW-SELF@example.test" }, { from: "/account" });
+    expect(r.headers.location).toBe("/login");
+    expect((await db.query("SELECT 1 FROM users WHERE email = 'new-self@example.test'")).rowCount).toBe(0);
+    expect((await me.get("/account")).headers.location).toMatch(/^\/login/);
   });
 });
