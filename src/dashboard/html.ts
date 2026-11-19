@@ -447,8 +447,8 @@ dialog.modal[open]{animation:pop .14s ease-out}
 
 /* ---------- filters and pages */
 .filters{display:flex;gap:10px 14px;flex-wrap:wrap;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
-.filter-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1;margin:0}
-.filter-form .search{display:flex;gap:8px;flex:1;min-width:200px;max-width:420px}
+.filter-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1 1 560px;margin:0}
+.filter-form .search{display:flex;gap:8px;flex:1 1 260px;max-width:440px}
 .filter-form select,.filter-form input[type=date]{width:auto;padding:6px 10px;font-size:13px}.filter-form select{padding-right:30px}
 .dates{display:inline-flex;gap:6px;align-items:center}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
@@ -522,6 +522,11 @@ document.addEventListener("DOMContentLoaded", () => {
     d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
     if (d.hasAttribute("data-open-now")) openDialog(d);
   });
+  // An address ending in #<dialog id> opens that dialog (e.g. after confirming identity).
+  if (location.hash.length > 1) {
+    const d = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+    if (d && d.tagName === "DIALOG") openDialog(d);
+  }
   // A typed confirmation: the button works once the text matches.
   document.querySelectorAll("input[data-typed]").forEach((i) => {
     const b = i.form && i.form.querySelector("[data-typed-submit]");

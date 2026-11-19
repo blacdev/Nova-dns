@@ -7,7 +7,7 @@ import type { Db } from "../src/db/db.js";
 import { parseSmtpUrl, type Mail, type Smtp } from "../src/lib/mail.js";
 import { totpAt } from "../src/lib/secrets.js";
 import { LiveConfig } from "../src/lib/settings.js";
-import { freshDb, platform } from "./helpers.js";
+import { freshDb, person, platform } from "./helpers.js";
 
 let db: Db;
 let app: ReturnType<typeof buildDashboard>;
@@ -365,5 +365,90 @@ describe("settings", () => {
     expect((await roleOf("helper@example.test")).role).toBe("superadmin");
     expect((await roleOf("chief@example.test")).role).toBe("admin");
     expect((await roleOf("chief@example.test")).permissions).toContain("billing.manage");
+  });
+});
+
+describe("lists", () => {
+  it("page through people and filter them", async () => {
+    for (let i = 0; i < 60; i++) await person(db, `bulk${String(i).padStart(2, "0")}@example.test`);
+    await db.query("UPDATE users SET last_login_at = now() WHERE email LIKE 'bulk%' AND email <> 'bulk07@example.test'");
+    const total = Number((await db.query("SELECT count(*) AS n FROM users")).rows[0].n);
+    let page = (await chief.get("/admin/users")).body;
+    expect(page).toContain(`Showing 1–50 of ${total} people`);
+    page = (await chief.get("/admin/users?page=2")).body;
+    expect(page).toContain(`Showing 51–${Math.min(100, total)} of ${total} people`);
+    page = (await chief.get("/admin/users?q=bulk&show=never")).body;
+    expect(page).toContain("bulk07@example.test");
+    expect(page).not.toContain("bulk08@example.test");
+    // A % in the search matches only a %.
+    expect((await chief.get("/admin/users?q=%25")).body).toContain("No one found");
+    page = (await chief.get("/admin/users?role=admin")).body;
+    expect(page).toContain("chief@example.test");
+    expect(page).not.toContain("bulk00@example.test");
+  });
+
+  it("keep what was typed when a form comes back, but never a secret", async () => {
+    await chief.post("/admin/stations", { email: "nobody@example.test", label: "kept-label" }, "/admin/stations");
+    const page = (await chief.get("/admin/stations")).body;
+    expect(page).toContain('value="kept-label"');
+    expect(page).toContain("There is no account for nobody@example.test");
+    expect(page).toContain("data-open-now");
+    // Shown once: the next page is clean.
+    expect((await chief.get("/admin/stations")).body).not.toContain('value="kept-label"');
+  });
+
+  it("filter stations and delete one from the list", async () => {
+    await person(db, "lister@example.test");
+    await chief.post("/admin/stations", { email: "lister@example.test", label: "listed" }, "/admin/stations");
+    const id = (await db.query<{ id: number }>("SELECT id FROM subdomains WHERE label = 'listed'")).rows[0].id;
+    await chief.post(`/admin/stations/${id}/suspend`, { back: "/admin/stations?state=suspended" }, "/admin/stations");
+    let page = (await chief.get("/admin/stations?state=suspended")).body;
+    expect(page).toContain("listed.example.test");
+    expect((await chief.get("/admin/stations?state=online")).body).not.toContain("listed.example.test");
+    const r = await chief.post(`/stations/${id}/delete`, { confirm: "listed", back: "/admin/stations?state=suspended" }, "/admin/stations");
+    expect(r.headers.location).toBe("/admin/stations?state=suspended");
+    expect(await chief.flash("/admin/stations?state=suspended")).toBe("listed.example.test is deleted.");
+    expect((await chief.get("/admin/stations?state=suspended")).body).not.toContain(`/stations/${id}"`);
+  });
+
+  it("warn instead of overwriting a name, and edit one", async () => {
+    await chief.post("/admin/names", { label: "keepme", kind: "reserved", reason: "ours" }, "/admin/names");
+    await chief.post("/admin/names", { label: "keepme", kind: "blocked", reason: "theirs" }, "/admin/names");
+    expect(await chief.flash("/admin/names")).toContain("already reserved");
+    expect((await db.query("SELECT kind, reason FROM reserved_names WHERE label = 'keepme'")).rows[0]).toEqual({ kind: "reserved", reason: "ours" });
+    await chief.post("/admin/names/edit", { label: "keepme", kind: "blocked", reason: "changed" }, "/admin/names");
+    expect((await db.query("SELECT kind, reason FROM reserved_names WHERE label = 'keepme'")).rows[0]).toEqual({ kind: "blocked", reason: "changed" });
+    expect((await chief.get("/admin/names?kind=blocked&q=keep")).body).toContain("keepme");
+  });
+
+  it("retry a failed certificate", async () => {
+    await person(db, "certy@example.test");
+    await chief.post("/admin/stations", { email: "certy@example.test", label: "certy" }, "/admin/stations");
+    const sd = (await db.query<{ id: number }>("SELECT id FROM subdomains WHERE label = 'certy'")).rows[0].id;
+    const c = (await db.query<{ id: number }>("INSERT INTO certificates (subdomain_id, fqdn, status, csr_pem, error, attempts) VALUES ($1, 'certy.example.test', 'failed', 'csr', 'boom', 5) RETURNING id", [sd])).rows[0].id;
+    expect((await chief.get("/admin/certificates?view=failed")).body).toContain("certy.example.test");
+    await chief.post(`/admin/certificates/${c}/retry`, { back: "/admin/certificates?view=failed" }, "/admin/certificates?view=failed");
+    expect((await db.query("SELECT status, attempts, error FROM certificates WHERE id = $1", [c])).rows[0]).toEqual({ status: "pending", attempts: 0, error: null });
+    // A newer certificate replaced it: nothing to retry.
+    await db.query("INSERT INTO certificates (subdomain_id, fqdn, status, csr_pem, created_at) VALUES ($1, 'certy.example.test', 'issued', 'csr', now() + interval '1 minute')", [sd]);
+    await db.query("UPDATE certificates SET status = 'failed' WHERE id = $1", [c]);
+    await chief.post(`/admin/certificates/${c}/retry`, {}, "/admin/certificates?view=failed");
+    expect(await chief.flash("/admin/certificates")).toContain("cannot be retried");
+  });
+
+  it("filter the audit log by area and date, and show a payment", async () => {
+    let page = (await chief.get("/admin/audit?area=name")).body;
+    expect(page).toContain("name.update");
+    expect(page).not.toContain("user.login");
+    page = (await chief.get("/admin/audit?area=name&to=2000-01-01")).body;
+    expect(page).toContain("Nothing found");
+    const uid = await idOf("certy@example.test");
+    const pid = (await db.query<{ id: number }>(`INSERT INTO payments (reference, user_id, email, plan_name, period, provider, live, amount_minor, currency, status)
+      VALUES ('ref_detail', $1, 'certy@example.test', 'Pro', 'month', 'stripe', false, 1999, 'USD', 'failed') RETURNING id`, [uid])).rows[0].id;
+    page = (await chief.get(`/admin/billing/payments/${pid}`)).body;
+    expect(page).toContain("ref_detail");
+    expect(page).toContain("$19.99");
+    expect((await chief.get("/admin/billing?status=failed&q=ref_det")).body).toContain("ref_detail");
+    expect((await chief.get("/admin/billing?status=paid&q=ref_det")).body).not.toContain("ref_detail");
   });
 });

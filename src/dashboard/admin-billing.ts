@@ -16,7 +16,8 @@ import { hit } from "../lib/limits.js";
 import { adminGuard } from "./admin.js";
 import type { DashDeps, Helpers } from "./app.js";
 import { paymentBadge } from "./app.js";
-import { badge, csrfField, emptyState, field, formSection, html, icon, pageHead, panel, when } from "./html.js";
+import { badge, csrfField, day, emptyState, facts, field, formSection, html, icon, pageHead, panel, when } from "./html.js";
+import { dateParam, filterBar, like, menu, menuLink, menuPost, pageOf, paged, pager, table } from "./ui.js";
 import type { Session } from "./session.js";
 
 export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
@@ -36,10 +37,15 @@ export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers
     const s = admin(req, reply, "billing.manage");
     if (!s) return reply;
     const b = await billingState(d.db, d.config.sessionSecret);
-    const status = String((req.query as Record<string, string>).status ?? "");
-    const payments = (await d.db.query(
-      `SELECT id, reference, email, user_id, plan_name, amount_minor, currency, status, provider, live, error, created_at, paid_at
-         FROM payments WHERE $1 = '' OR status = $1 ORDER BY created_at DESC LIMIT 100`, [["paid", "pending", "failed", "abandoned"].includes(status) ? status : ""])).rows;
+    const query = req.query as Record<string, string>;
+    const status = ["paid", "pending", "failed", "abandoned"].includes(query.status) ? query.status : "";
+    const search = String(query.q ?? "").trim().toLowerCase().slice(0, 100);
+    const pg = pageOf(query);
+    const { rows: payments, total } = await paged<{ id: number; reference: string; email: string; user_id: number | null; plan_name: string; amount_minor: string; currency: string; status: string; provider: string; live: boolean; error: string | null; created_at: Date; paid_at: Date | null }>(d.db,
+      `SELECT id, reference, email, user_id, plan_name, amount_minor, currency, status, provider, live, error, created_at, paid_at FROM payments
+        WHERE ($1 = '' OR status = $1) AND ($2 = '' OR lower(email) LIKE '%' || $2 || '%' OR lower(reference) LIKE '%' || $2 || '%' OR lower(plan_name) LIKE '%' || $2 || '%')
+          AND ($3 = '' OR created_at >= NULLIF($3, '')::date) AND ($4 = '' OR created_at < NULLIF($4, '')::date + 1)
+        ORDER BY created_at DESC`, [status, like(search), dateParam(query.from), dateParam(query.to)], pg);
     const priced = Number((await d.db.query("SELECT count(*) AS n FROM plans WHERE price_minor IS NOT NULL")).rows[0].n);
     const active = b.provider;
     const modeBadge = (p: ProviderId) => (!b.providers[p].configured ? badge("neutral", "Not set up") : b.providers[p].live ? badge("ok", "Live keys") : badge("warn", "Test keys"));
@@ -79,14 +85,16 @@ export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers
 
       ${[...(active ? [active] : []), ...PROVIDERS.filter((p) => p !== active)].map(providerPanel)}
 
-      ${panel({ title: "Payments", flush: true, actions: html`<form method="get" class="row tight"><select name="status" aria-label="Status" style="width:auto">
-          ${[["", "All"], ["paid", "Paid"], ["pending", "Pending"], ["failed", "Failed"], ["abandoned", "Abandoned"]].map(([v, t]) => html`<option value="${v}"${status === v ? " selected" : ""}>${t}</option>`)}</select><button class="sm">Filter</button></form>` },
-        payments.length ? html`<div class="table-wrap"><table><tr><th>Date</th><th>Customer</th><th>Plan</th><th class="num">Amount</th><th>Status</th><th class="wide-only">Provider</th><th class="wide-only">Reference</th><th class="actions"></th></tr>${payments.map((p) => html`<tr>
-          <td style="white-space:nowrap">${when(p.created_at)}</td><td>${p.user_id ? html`<a href="/admin/users/${p.user_id}">${p.email}</a>` : p.email}</td><td>${p.plan_name}</td>
+      ${panel({ title: "Payments", flush: true, id: "payments" }, html`${filterBar({ path: "/admin/billing", query, search: { placeholder: "Search email, reference or plan" }, dates: true,
+          chips: { name: "status", label: "Status", options: [["", "All"], ["paid", "Paid"], ["pending", "Pending"], ["failed", "Failed"], ["abandoned", "Abandoned"]] } })}
+        ${payments.length ? table(["Date", "Customer", "Plan", { text: "Amount", cls: "num" }, "Status", { text: "Provider", cls: "wide-only" }, { text: "Reference", cls: "wide-only" }, { text: "", cls: "actions" }], payments.map((p) => html`<tr>
+          <td style="white-space:nowrap"><a href="/admin/billing/payments/${p.id}">${when(p.created_at)}</a></td><td>${p.user_id ? html`<a href="/admin/users/${p.user_id}">${p.email}</a>` : p.email}</td><td>${p.plan_name}</td>
           <td class="num">${formatMoney(Number(p.amount_minor), p.currency)}</td><td>${paymentBadge(p.status)}${p.live ? "" : html` ${badge("warn", "Test")}`}${p.error ? html`<span class="sub bad">${p.error}</span>` : ""}</td>
           <td class="wide-only">${PROVIDER_INFO[p.provider as ProviderId]?.name ?? p.provider}</td><td class="wide-only"><code>${p.reference}</code></td>
-          <td class="actions">${p.status === "pending" || p.status === "abandoned" ? html`<form method="post" action="/admin/billing/payments/${p.id}/recheck">${csrfField(s.csrf)}<button class="sm">Check again</button></form>` : ""}</td></tr>`)}</table></div>`
-        : emptyState("No payments yet", b.enabled ? "Payments will appear here as people buy plans." : "Turn payments on to let people buy plans."))}`, h.takeFlash(req, reply));
+          <td class="actions">${menu([menuLink(`/admin/billing/payments/${p.id}`, "Details", "info"),
+            p.status === "pending" || p.status === "abandoned" ? menuPost(`/admin/billing/payments/${p.id}/recheck`, "Check again with the provider", s.csrf, { ic: "activity" }) : ""], { aria: `Actions for ${p.reference}` })}</td></tr>`))
+        : emptyState(status || search || query.from || query.to ? "Nothing found" : "No payments yet", status || search || query.from || query.to ? "No payment matches these filters." : b.enabled ? "Payments will appear here as people buy plans." : "Turn payments on to let people buy plans.")}
+        ${pager("/admin/billing", query, pg, total, "payments")}`)}`, h.takeFlash(req, reply));
   });
 
   const fail = (reply: FastifyReply, e: unknown, to = "/admin/billing") => {
@@ -172,6 +180,32 @@ export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers
     }
   });
 
+  app.get("/admin/billing/payments/:id", async (req, reply) => {
+    const s = admin(req, reply, "billing.manage");
+    if (!s) return reply;
+    const id = Number((req.params as { id: string }).id);
+    const p = (await d.db.query<{ id: number; reference: string; user_id: number | null; email: string; plan_id: number | null; plan_name: string; period: string; provider: string; live: boolean; amount_minor: string; currency: string; status: string; provider_ref: string | null; error: string | null; paid_at: Date | null; period_end: Date | null; created_at: Date; updated_at: Date }>(
+      "SELECT * FROM payments WHERE id = $1", [Number.isSafeInteger(id) ? id : -1])).rows[0];
+    if (!p) return h.render(req, reply, "Not found", html`${pageHead({ title: "No such payment", back: { href: "/admin/billing#payments", text: "Payments" } })}`, null, 404);
+    const recheck = p.status === "pending" || p.status === "abandoned";
+    return h.render(req, reply, p.reference, html`${pageHead({ title: `${formatMoney(Number(p.amount_minor), p.currency)} · ${p.plan_name}`, back: { href: "/admin/billing#payments", text: "Payments" },
+        meta: html`${paymentBadge(p.status)}${p.live ? "" : badge("warn", "Test")}<span>Reference <code>${p.reference}</code></span>`,
+        actions: recheck ? html`<form method="post" action="/admin/billing/payments/${p.id}/recheck">${csrfField(s.csrf)}<input type="hidden" name="back" value="/admin/billing/payments/${p.id}"><button>${icon("activity", 16)} Check again with the provider</button></form>` : "" })}
+      ${p.error ? html`<div class="callout bad">${icon("alert")}<div><b>The provider said</b><p>${p.error}</p></div></div>` : ""}
+      ${panel({ title: "Payment" }, facts([
+        ["Customer", p.user_id ? html`<a href="/admin/users/${p.user_id}">${p.email}</a>` : html`${p.email} <span class="dim">(account deleted)</span>`],
+        ["Plan", html`${p.plan_id ? html`<a href="/admin/plans/${p.plan_id}">${p.plan_name}</a>` : p.plan_name} <span class="dim">· 1 ${p.period}</span>`],
+        ["Amount", formatMoney(Number(p.amount_minor), p.currency)],
+        ["Status", paymentBadge(p.status)],
+        ["Provider", html`${PROVIDER_INFO[p.provider as ProviderId]?.name ?? p.provider} ${p.live ? badge("ok", "Live") : badge("warn", "Test")}`],
+        ["Provider's reference", p.provider_ref ? html`<code>${p.provider_ref}</code>` : "—"],
+        ["Started", when(p.created_at)],
+        ["Paid", when(p.paid_at)],
+        ["Covers until", day(p.period_end)],
+        ["Last change", when(p.updated_at)],
+      ]))}`, h.takeFlash(req, reply));
+  });
+
   app.post("/admin/billing/payments/:id/recheck", async (req, reply) => {
     const s = admin(req, reply, "billing.manage");
     if (!s) return reply;
@@ -182,7 +216,8 @@ export function billingAdminRoutes(app: FastifyInstance, d: DashDeps, h: Helpers
       // An abandoned payment may still have gone through: ask once more.
       await d.db.query("UPDATE payments SET status = 'pending' WHERE id = $1 AND status = 'abandoned'", [id]);
       const p = await confirm(deps(), ref);
-      return h.back(reply, "/admin/billing", { kind: "ok", text: `${ref}: ${p?.status ?? "unknown"}.` });
+      const to = h.form(req).back === `/admin/billing/payments/${id}` ? `/admin/billing/payments/${id}` : "/admin/billing#payments";
+      return h.back(reply, to, { kind: "ok", text: `${ref}: ${p?.status ?? "unknown"}.` });
     } catch (e) {
       return fail(reply, e);
     }

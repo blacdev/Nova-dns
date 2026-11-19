@@ -647,9 +647,11 @@ export function buildDashboard(d: DashDeps): FastifyInstance {
   });
   action("delete", async (s, id, f, req, reply) => {
     const label = (await d.db.query("SELECT label FROM subdomains WHERE id = $1", [id])).rows[0].label;
-    if (String(f.confirm ?? "").trim().toLowerCase() !== label) return back(reply, `/stations/${id}`, { kind: "bad", text: "Type the name exactly to delete." });
+    // From Admin > All stations, back to the list it was deleted from.
+    const list = can(s.user, "stations.manage") && /^\/admin\/stations(\?[\w=&%.\-+]*)?$/.test(f.back ?? "") ? f.back : null;
+    if (String(f.confirm ?? "").trim().toLowerCase() !== label) return back(reply, list ?? `/stations/${id}#delete-station`, { kind: "bad", text: "Type the name exactly to delete." });
     await subs.remove(ctx(), actor(s, req), id);
-    return back(reply, "/", { kind: "ok", text: `${fqdnOf(label, d.config.rootDomain)} is deleted.` });
+    return back(reply, list ?? "/", { kind: "ok", text: `${fqdnOf(label, d.config.rootDomain)} is deleted.` });
   });
   action("transfer", async (s, id, f, req, reply) => {
     const r = await subs.transfer(ctx(), actor(s, req), id, String(f.email ?? ""));

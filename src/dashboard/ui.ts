@@ -128,10 +128,10 @@ export interface Page {
   offset: number;
 }
 
-export function pageOf(query: Query, per = 50): Page {
+export function pageOf(query: Query, per = 50, param = "page"): Page {
   const n = Number(query.per);
-  const size = PER_PAGE.includes(n) ? n : per;
-  const page = Math.min(Math.max(1, Math.floor(Number(query.page)) || 1), 100_000);
+  const size = param === "page" && PER_PAGE.includes(n) ? n : per;
+  const page = Math.min(Math.max(1, Math.floor(Number(query[param])) || 1), 100_000);
   return { page, per: size, offset: (page - 1) * size };
 }
 
@@ -148,13 +148,13 @@ export async function paged<T>(db: Queryable, sql: string, params: unknown[], p:
 }
 
 /** "Showing 51–100 of 812", page links and the page size; nothing when one page shows everything. */
-export function pager(path: string, query: Query, p: Page, total: number, noun = "rows"): Html | string {
-  if (total <= PER_PAGE[0] && p.page === 1) return "";
+export function pager(path: string, query: Query, p: Page, total: number, noun = "rows", param = "page"): Html | string {
+  if (total <= Math.min(p.per, PER_PAGE[0]) && p.page === 1) return "";
   const pages = Math.max(1, Math.ceil(total / p.per));
   const from = total ? Math.min(p.offset + 1, total) : 0;
   const to = Math.min(p.offset + p.per, total);
   const link = (n: number, text: Html | string, label: string, current = false) =>
-    current ? html`<span class="pg cur" aria-current="page">${text}</span>` : html`<a class="pg" href="${withQuery(path, query, { page: n === 1 ? undefined : String(n) })}" aria-label="${label}">${text}</a>`;
+    current ? html`<span class="pg cur" aria-current="page">${text}</span>` : html`<a class="pg" href="${withQuery(path, query, { [param]: n === 1 ? undefined : String(n) })}" aria-label="${label}">${text}</a>`;
   const nums: (number | "…")[] = [];
   for (let i = 1; i <= pages; i++) {
     if (i === 1 || i === pages || Math.abs(i - p.page) <= 1) nums.push(i);
@@ -166,9 +166,9 @@ export function pager(path: string, query: Query, p: Page, total: number, noun =
     <span class="pager-pages">${p.page > 1 ? link(p.page - 1, "‹ Prev", "Previous page") : html`<span class="pg off">‹ Prev</span>`}
       ${nums.map((x) => (x === "…" ? html`<span class="pg gap">…</span>` : link(x, String(x), `Page ${x}`, x === p.page)))}
       ${p.page < pages ? link(p.page + 1, "Next ›", "Next page") : html`<span class="pg off">Next ›</span>`}</span>
-    <form method="get" action="${path}" class="pager-per" data-autosubmit>${keep.map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
+    ${param !== "page" ? "" : html`<form method="get" action="${path}" class="pager-per" data-autosubmit>${keep.map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
       <label for="per-${noun.replace(/\W/g, "")}" class="sr-only">Per page</label><select id="per-${noun.replace(/\W/g, "")}" name="per">${PER_PAGE.map((n) => html`<option value="${n}"${n === p.per ? " selected" : ""}>${n} per page</option>`)}</select>
-      <noscript><button class="sm">Go</button></noscript></form></nav>`;
+      <noscript><button class="sm">Go</button></noscript></form>`}</nav>`;
 }
 
 // ---------------------------------------------------------------- filters
@@ -204,6 +204,9 @@ export function filterBar(f: Filters): Html {
       ${active ? html`<a class="btn ghost sm" href="${f.path}">Clear</a>` : ""}
     </form></div>`;
 }
+
+/** A search term for LIKE '%…%': its own % and _ match only themselves. */
+export const like = (q: string) => q.replace(/[\\%_]/g, "\\$&");
 
 /** A yyyy-mm-dd date from the address, or "". */
 export const dateParam = (v: unknown) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? "")) && !Number.isNaN(Date.parse(String(v))) ? String(v) : "");

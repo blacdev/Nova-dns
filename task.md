@@ -46,16 +46,16 @@ choice, and it can only be tested after saving.
 
 ## Phase 2 — Admin lists
 
-- [ ] 12. **M** People: pagination, filters (role, status, 2FA, email confirmed, invited), row menu, "Actions ▾" on the person page, delete in a typed-confirm modal.
-- [ ] 13. **M** All stations: pagination, status filter (online/offline/suspended), row menu (open, suspend/restore, delete via modal), create form keeps values.
-- [ ] 14. **M** Audit log, DNS & ACME events, Payments, Audio relay: pagination, date range, level/status chips, expandable metadata, search on payments.
-- [ ] 15. **S** Names and Certificates: pagination and search; "Retry now" on failed/waiting certificates.
+- [x] 12. **M** People: pagination, filters (role, status, 2FA, email confirmed, invited), row menu, "Actions ▾" on the person page, delete in a typed-confirm modal.
+- [x] 13. **M** All stations: pagination, status filter (online/offline/suspended), row menu (open, suspend/restore, delete via modal), create form keeps values.
+- [x] 14. **M** Audit log, DNS & ACME events, Payments, Audio relay: pagination, date range, level/status chips, expandable metadata, search on payments.
+- [x] 15. **S** Names and Certificates: pagination and search; "Retry now" on failed/waiting certificates.
 
 ## Phase 3 — Admin CRUD gaps
 
 - [ ] 16. **S** Plan form keeps values and shows field errors; the default plan cannot be deleted; delete in a modal stating how many people move.
 - [ ] 17. **M** Edit a person's email (new address must be confirmed; old address told); "Invited" state; "Resend invite".
-- [ ] 18. **S** Edit a reserved/blocked name (kind, reason); adding one that exists warns instead of overwriting.
+- [x] 18. **S** Edit a reserved/blocked name (kind, reason); adding one that exists warns instead of overwriting.
 - [ ] 19. **S** Payment detail page; Role, Name kind, DNS provider and certificate environment as radio cards; confirmations for provider switch, DNS → None, production certificates.
 
 ## Phase 4 — Station-owner side
