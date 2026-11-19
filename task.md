@@ -30,7 +30,7 @@ spaces break it, the whole URL must be re-typed to change one part, there is no 
 choice, and it can only be tested after saving.
 
 - [x] 1. **M** Split SMTP into `smtpHost`, `smtpPort`, `smtpSecurity` (`ssl`·`starttls`·`none`), `smtpUser`, `smtpPassword` (secret) in `config.ts`, `lib/settings.ts`, `lib/mail.ts`; nodemailer transport built from an options object. `SMTP_URL` (env and a previously saved setting) is still read and split into the fields.
-- [x] 2. **M** New Email settings form: provider presets (Gmail, Microsoft 365, SES, Mailgun, Postmark, SendGrid, Brevo, Zoho, Custom), security radio cards that set the default port, port, username, password with show/hide and "remove password", sender name + sender email.
+- [x] 2. **M** New Email settings form: provider presets (your own mail server such as Plesk or cPanel first, then Gmail, Microsoft 365, SES, Mailgun, Postmark, SendGrid, Brevo, Zoho, Custom), security radio cards that set the default port, port, username, password with show/hide and "remove password", sender name + sender email.
 - [x] 3. **S** "Send test email" uses the values in the form (before saving) to a chosen address: `verify()` then send, with plain-language errors (auth, connection, timeout, TLS mismatch, DNS, sender rejected).
 - [x] 4. **S** Setup checks / overview / `setup.sh` / `.env.example` / README / tests updated.
 

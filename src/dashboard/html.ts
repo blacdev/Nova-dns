@@ -642,6 +642,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (port) port.value = o.getAttribute("data-port");
       const user = smtp.querySelector("#smtpUser");
       if (o.getAttribute("data-user") && user) user.value = o.getAttribute("data-user");
+      // Your own mailbox: it signs in as the address it sends from.
+      const sender = smtp.querySelector("#mailFromEmail");
+      if (o.value === "own" && user && !user.value && sender) user.value = sender.value;
     });
   }
   // Show or hide a password.

@@ -34,6 +34,9 @@ export const smtpPort = (s: Pick<Smtp, "port" | "security">) => s.port || DEFAUL
 
 /** Well-known providers: what the settings page fills in when one is picked. */
 export const SMTP_PRESETS: { id: string; name: string; host: string; security: SmtpSecurity; port: number; user?: string; note: string }[] = [
+  // A mailbox on your own hosting. "{domain}" becomes the platform's domain; change it if your mail is elsewhere.
+  { id: "own", name: "Your own mail server (Plesk, cPanel, a VPS…)", host: "mail.{domain}", security: "ssl", port: 465,
+    note: "Use the mailbox's full email address as the username and its password. The host is usually mail.yourdomain, or the server's own name: whichever name the mail server's SSL certificate covers (in Plesk: Tools & Settings > SSL/TLS Certificates > certificate for securing mail). 465 with SSL/TLS, or 587 with STARTTLS." },
   { id: "gmail", name: "Gmail / Google Workspace", host: "smtp.gmail.com", security: "ssl", port: 465, note: "Use an app password (Google Account > Security > App passwords), not your normal password." },
   { id: "m365", name: "Microsoft 365 / Outlook", host: "smtp.office365.com", security: "starttls", port: 587, note: "SMTP AUTH must be allowed for the mailbox in the Microsoft 365 admin centre." },
   { id: "ses", name: "Amazon SES", host: "email-smtp.us-east-1.amazonaws.com", security: "starttls", port: 587, note: "Change the region in the host to yours. Use SMTP credentials from the SES console, not your AWS keys." },
@@ -109,7 +112,12 @@ export function explainSmtpError(e: unknown, s: Smtp): string {
     return `No answer from ${where}. Check the host and port, and that this machine may connect out on port ${smtpPort(s)} (many cloud hosts block 25).`;
   }
   if (/STARTTLS/i.test(msg)) return `${where} does not offer STARTTLS. Choose SSL/TLS (465) or, only on a trusted network, None.`;
-  if (/self.signed|certificate|CERT_/i.test(msg)) return `The server's certificate is not trusted (${msg.slice(0, 120)}).`;
+  if (/altnames|does not match/i.test(msg)) {
+    return `The mail server's certificate is not issued for ${s.host}. Enter the name it is issued for (often the server's hostname), or secure ${s.host} with a certificate (in Plesk: Tools & Settings > SSL/TLS Certificates > certificate for securing mail).`;
+  }
+  if (/self.signed|certificate|CERT_|unable to verify/i.test(msg)) {
+    return `The mail server's certificate is not trusted (${msg.slice(0, 100)}). Give it a certificate from a public authority such as Let's Encrypt (Plesk does this in Tools & Settings > SSL/TLS Certificates).`;
+  }
   if (code === "EENVELOPE" || err.responseCode === 550 || err.responseCode === 553 || err.responseCode === 554) {
     return `The server would not send it: ${(err.response ?? msg).slice(0, 160)}. The sender address may not be allowed for this account.`;
   }

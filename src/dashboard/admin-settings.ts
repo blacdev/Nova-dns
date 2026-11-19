@@ -93,13 +93,14 @@ export function settingsRoutes(app: FastifyInstance, d: DashDeps, h: Helpers) {
     const c = d.config;
     const from = splitFrom(c.mailFrom);
     const security = c.smtpSecurity;
-    const preset = SMTP_PRESETS.find((p) => p.host === c.smtpHost);
+    const presets = SMTP_PRESETS.map((p) => ({ ...p, host: p.host.replace("{domain}", c.rootDomain) }));
+    const preset = presets.find((p) => p.host === c.smtpHost);
     return html`<form method="post" action="/admin/settings/mail" id="mail" data-smtp>${csrfField(s.csrf)}${panel({ title: "Email", sub: "Confirmation links, password resets, security notices and the admins' daily alert." }, html`
       ${legacy ? html`<div class="callout info">${icon("info")}<div><b>Saved as one SMTP address by an earlier version</b><p>Its parts are shown below. Saving this form stores them separately.</p></div></div>` : ""}
-      ${formSection("Provider", "Pick yours to fill in the server details, or enter them yourself.", html`
+      ${formSection("Provider", "Your own mailbox (Plesk, cPanel…) or a sending service: picking one fills in the server details, which you can still change.", html`
         ${field({ id: "smtpPreset", label: "Email provider", control: html`<select id="smtpPreset" class="w-md" data-smtp-preset>
-          <option value="">Other / custom</option>
-          ${SMTP_PRESETS.map((p) => html`<option value="${p.id}" data-host="${p.host}" data-port="${p.port}" data-security="${p.security}" data-user="${p.user ?? ""}" data-note="${p.note}"${preset?.id === p.id ? " selected" : ""}>${p.name}</option>`)}</select>
+          <option value="">Other server (enter its details)</option>
+          ${presets.map((p) => html`<option value="${p.id}" data-host="${p.host}" data-port="${p.port}" data-security="${p.security}" data-user="${p.user ?? ""}" data-note="${p.note}"${preset?.id === p.id ? " selected" : ""}>${p.name}</option>`)}</select>
           <p class="help" id="smtp-preset-note">${preset?.note ?? ""}</p>` })}`)}
       ${formSection("Server", "Where the platform connects to send email.", html`
         ${field({ id: "smtpHost", label: "SMTP host", help: html`A server name like <code>smtp.example.com</code>. Leave empty to send no email (messages only go to the log).`, control: html`<input id="smtpHost" name="smtpHost" value="${c.smtpHost}" autocomplete="off" spellcheck="false" maxlength="253" placeholder="smtp.example.com">${source("smtpHost")}` })}
